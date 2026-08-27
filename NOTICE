@@ -1,0 +1,16 @@
+Agentic-MLLM-RL
+Copyright 2026 Agentic-MLLM-RL contributors
+
+This product includes software developed by the Relax Authors and distributed
+by the redai-infra project under the Apache License, Version 2.0:
+
+  https://github.com/redai-infra/Relax
+
+This repository is derived from Relax commit:
+
+  d52cd0aca9b347a57fb435bda3ae2db8fc6706a4
+
+The derivative work adds dual local Judge services, agentic reward contexts,
+MobileGym integration, placement and telemetry support, latency analyzers, and
+their tests. Modified and added paths are recorded in PROVENANCE.md and in the
+repository history. Original copyright and attribution notices are retained.

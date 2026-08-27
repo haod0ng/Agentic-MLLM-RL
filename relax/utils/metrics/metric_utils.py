@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Relax Authors. All Rights Reserved.
+
 import logging
 import math
 from typing import Any, Literal
@@ -190,6 +192,6 @@ def has_repetition(text: str):
 
 
 def compute_rollout_step(args, rollout_id):
-    if args.wandb_always_use_train_step:
+    if getattr(args, "wandb_always_use_train_step", False):
         return rollout_id * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
     return rollout_id
