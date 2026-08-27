@@ -1,0 +1,320 @@
+# Copyright (c) 2026 Relax Authors. All Rights Reserved.
+"""DeepEyes V2 agentic-stack agent driver.
+
+One process per Relax-managed session. Talks to ``AgenticChatAPIService`` over
+OpenAI-compatible chat completions. Parses inline ``<answer>`` / ``<code>`` /
+``<tool_call>`` tags and routes to ``DeepEyesV2Env``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import base64
+import json
+import logging
+import os
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+import httpx
+import yaml
+from app.env_deepeyes_v2 import (
+    DeepEyesV2Env,
+    ToolObs,
+    encode_image_data_uri,
+    extract_answer,
+    extract_tool_call,
+)
+from app.sandboxes import SandboxExecutor, get_sandbox_backend
+from PIL import Image
+
+
+CONFIG_PATH = Path(__file__).with_name("deepeyes_v2_config.yaml")
+
+logger = logging.getLogger(__name__)
+
+
+def read_session_input(path: str | Path) -> dict[str, Any]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def write_session_output(path: str | Path, payload: dict[str, Any]) -> None:
+    # Defensive: if Relax already discarded the session (timeout) it will
+    # have deleted the tmpdir out from under us. Runtime SIGKILLs us in that
+    # case, but during the race window we may still reach here. Skip the
+    # write instead of dying with FileNotFoundError.
+    try:
+        Path(path).write_text(json.dumps(payload), encoding="utf-8")
+    except FileNotFoundError:
+        pass
+
+
+def load_initial_image(messages: list[dict[str, Any]]) -> Image.Image | None:
+    """Pull the first image attached to the last user message, if any.
+
+    Dataset prompts arrive with image data URLs in ``content[*].image_url.url``
+    (see ``relax/agentic/pipeline/runtime.py:1157``).
+    """
+    if not messages:
+        return None
+    last = messages[-1]
+    content = last.get("content")
+    if not isinstance(content, list):
+        return None
+    for item in content:
+        if item.get("type") != "image_url":
+            continue
+        url = item["image_url"]["url"]
+        _, _, encoded = url.partition(",")
+        with BytesIO(base64.b64decode(encoded)) as fh:
+            img = Image.open(fh)
+            img.load()
+            return img
+    return None
+
+
+def build_tool_message(*, body_text: str, images: list[Image.Image]) -> dict[str, Any]:
+    """Build a ``role:"tool"`` observation message.
+
+    Image-bearing messages MUST use the OpenAI content-part array with
+    ``data:image/png;base64,...`` URLs — that's the only shape the agentic chat
+    service accepts on a tool turn (see
+    ``relax/agentic/session/service.py:485``).
+    """
+    if not images:
+        return {"role": "tool", "content": body_text}
+    parts: list[dict[str, Any]] = [{"type": "text", "text": body_text}]
+    parts.extend({"type": "image_url", "image_url": {"url": encode_image_data_uri(img)}} for img in images)
+    return {"role": "tool", "content": parts}
+
+
+# Precedence: terminal <answer> wins over <code> wins over <tool_call> wins over format_error.
+# Under the unified schema, a <tool_call> with name=python_exec is also a code branch
+# (env.exec_code's extractor knows both <code>...</code> and the tool_call payload form).
+def classify_branch(text: str) -> str:
+    if extract_answer(text) is not None:
+        return "answer"
+    if "<code>" in text:
+        return "code"
+    if "<tool_call>" in text:
+        tc = extract_tool_call(text)
+        if tc and tc.get("name") == "python_exec":
+            return "code"
+        return "tool_call"
+    return "format_error"
+
+
+def _build_executor(backend_name: str, ensure_sandbox_timeout_s: int) -> SandboxExecutor:
+    """Instantiate the sandbox backend (with optional config from
+    ``SANDBOX_CONFIG_PATH``) and hand it to the executor singleton.
+
+    Mirrors xide's ``_get_sandbox_executor`` indirection: backend kwargs live
+    in a YAML pointed to by ``SANDBOX_CONFIG_PATH`` so the agent process never
+    hardcodes container paths.
+
+    Env-var overrides (so the launcher can swap backends/images without
+    editing the YAML):
+
+    * ``SANDBOX_BACKEND``: overrides the backend name from caller.
+    * ``APPTAINER_IMAGE_PATH``: overrides ``image`` in the loaded YAML
+      (only meaningful for apptainer-style backends).
+
+    Relative paths in the YAML (e.g. ``image: ./foo.sif``) resolve against
+    the YAML's parent directory, not the agent process CWD.
+    """
+    backend_name = os.environ.get("SANDBOX_BACKEND", backend_name)
+    config_path = os.environ.get("SANDBOX_CONFIG_PATH")
+    backend_kwargs: dict[str, Any] = {}
+    config_dir: Path | None = None
+    if config_path:
+        config_path_p = Path(config_path)
+        backend_kwargs = yaml.safe_load(config_path_p.read_text(encoding="utf-8")) or {}
+        config_dir = config_path_p.parent
+    image_override = os.environ.get("APPTAINER_IMAGE_PATH")
+    if image_override:
+        backend_kwargs["image"] = image_override
+    if config_dir is not None:
+        for key in ("image",):
+            val = backend_kwargs.get(key)
+            if isinstance(val, str) and val and not os.path.isabs(val):
+                backend_kwargs[key] = str(config_dir / val)
+    backend = get_sandbox_backend(name=backend_name, config=backend_kwargs)
+    return SandboxExecutor.get_or_create(backend, ensure_session_timeout_s=ensure_sandbox_timeout_s)
+
+
+async def run_session(messages: list[dict[str, Any]], metadata: dict[str, Any]) -> dict[str, Any]:
+    from openai import (  # type: ignore[import-not-found]
+        APIConnectionError,
+        APIStatusError,
+        APITimeoutError,
+        AsyncOpenAI,
+    )
+
+    config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    max_turns = int(config["max_turns"])
+    ensure_sandbox_timeout_s = int(config["ensure_sandbox_timeout_s"])
+    # See the AsyncOpenAI construction and the per-turn request loop below for
+    # why these two exist (colocate engine-sleep survival).
+    llm_call_timeout_s = float(config.get("llm_call_timeout_s", 600.0))
+    max_llm_call_timeout_retries = int(config.get("max_llm_call_timeout_retries", 60))
+
+    data_index = str(metadata.get("data_index") or metadata.get("index") or "?")
+    executor = _build_executor(config["sandbox_backend"], ensure_sandbox_timeout_s)
+    env = DeepEyesV2Env(
+        data_index=data_index,
+        sandbox_executor=executor,
+        image=load_initial_image(messages),
+        code_timeout_s=int(config["code_timeout_s"]),
+        ensure_sandbox_timeout_s=ensure_sandbox_timeout_s,
+    )
+
+    client = AsyncOpenAI(
+        api_key=os.environ["OPENAI_API_KEY"],
+        base_url=os.environ["OPENAI_BASE_URL"].rstrip("/"),
+        # llm_call_timeout_s (default 600s) is generous margin over the expected
+        # 20-45s per-turn even under SGLang backpressure. It is deliberately NOT
+        # the livelock guard: in colocate mode the rollout engine is offloaded
+        # (asleep) for the entire actor training window, which routinely exceeds
+        # any per-request budget, so an in-flight request would otherwise hit
+        # this timeout and crash the session with exit 1 -> the whole
+        # 256-sample batch is dropped -> Relax regenerates -> Ray/GCS task
+        # pileup -> GCS OOM. We instead retry on timeout in the loop below and
+        # let Relax's sleep-aware session timeout (SIGTERM) / 404
+        # session_discarded be the real deadline. max_retries=0 keeps the SDK
+        # from stacking its own hidden retry loop on top of ours.
+        timeout=httpx.Timeout(timeout=llm_call_timeout_s, connect=30.0),
+        max_retries=0,
+    )
+
+    stop_reason = "max_turns"
+    branch_counts = {"answer": 0, "code": 0, "tool_call": 0, "format_error": 0}
+    final_answer: str | None = None
+    last_error: str | None = None
+
+    # Token-id stops only: matched on the GPU side, bypass the detokenizer
+    # subprocess. String stops (SGLang "stop") add per-token substring-match
+    # work in the detokenizer and can starve its heartbeat under agentic
+    # high concurrency, so we avoid them entirely. See deepeyes_v2_config.yaml.
+    extra_body: dict[str, Any] = {}
+    stop_token_ids = config.get("stop_token_ids") or []
+    if stop_token_ids:
+        extra_body["stop_token_ids"] = list(stop_token_ids)
+
+    try:
+        for _turn in range(max_turns):
+            try:
+                resp = None
+                timeout_retries = 0
+                while resp is None:
+                    try:
+                        resp = await client.chat.completions.create(
+                            model=os.environ.get("OPENAI_MODEL", "model"),
+                            messages=messages,
+                            extra_body=extra_body,
+                        )
+                    except (APITimeoutError, APIConnectionError) as exc:
+                        # In colocate mode the SGLang rollout engine is
+                        # offloaded (asleep) for the entire actor training
+                        # window, which routinely exceeds one request's timeout.
+                        # A hung request must NOT crash the session (exit 1 ->
+                        # whole 256-sample batch dropped -> Relax regenerates ->
+                        # Ray/GCS task pileup -> GCS OOM). Poll instead: on
+                        # engine wake the request succeeds. Relax's sleep-aware
+                        # session timeout (SIGTERM) and the 404
+                        # session_discarded path stay the real deadlines, so
+                        # this loop cannot livelock a genuinely dead engine.
+                        timeout_retries += 1
+                        if timeout_retries > max_llm_call_timeout_retries:
+                            raise
+                        logger.warning(
+                            "[agent] %s on chat turn %s (retry %s/%s); "
+                            "rollout engine likely offloaded for training, polling for wake...",
+                            type(exc).__name__,
+                            _turn,
+                            timeout_retries,
+                            max_llm_call_timeout_retries,
+                        )
+                        await asyncio.sleep(min(5.0 * timeout_retries, 30.0))
+            except APIStatusError as exc:
+                err = (exc.response.json() or {}).get("error", {})
+                code = err.get("code") if isinstance(err, dict) else None
+                if code == "context_length_exceeded":
+                    stop_reason = "finish_length"
+                    break
+                # Sync-mode tail discard: Relax pipeline pops the session
+                # record at step close (relax/agentic/rollout.py:953 →
+                # drop_resident_results) when enough committed groups are
+                # in. The agent's next chat hits 404 session_discarded;
+                # the output JSON is no longer consumed, so just exit
+                # cleanly instead of crashing with a traceback.
+                if code == "session_discarded":
+                    stop_reason = "discarded_by_pipeline"
+                    break
+                raise
+
+            text = resp.choices[0].message.content or ""
+            messages.append({"role": "assistant", "content": text})
+            if resp.choices[0].finish_reason == "length":
+                stop_reason = "finish_length"
+                break
+
+            branch = classify_branch(text)
+            branch_counts[branch] += 1
+
+            if branch == "answer":
+                final_answer = extract_answer(text)
+                stop_reason = "env_done"
+                break
+            if branch == "format_error":
+                stop_reason = "format_error"
+                last_error = "no_recognised_tag"
+                break
+
+            obs: ToolObs
+            if branch == "code":
+                obs = await env.exec_code(text)
+            else:
+                obs = await env.exec_tool(text)
+
+            if obs.error:
+                last_error = obs.error
+            messages.append(build_tool_message(body_text=obs.body_text, images=obs.images))
+            if obs.done:
+                stop_reason = "env_done" if obs.error is None else f"env_error:{obs.error}"
+                break
+    finally:
+        await env.close()
+
+    # SessionOutput (relax/agentic/pipeline/runtime.py:160) only accepts
+    # "metadata" and "reward". The chat trajectory is already captured by
+    # Relax through the chat-completions endpoint, so don't ship messages.
+    return {
+        "metadata": {
+            "stop_reason": stop_reason,
+            "branch_counts": branch_counts,
+            "final_answer": final_answer,
+            "last_error": last_error,
+            "data_source": metadata.get("data_source"),
+        },
+    }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="DeepEyes V2 agentic session.")
+    parser.add_argument("--input-json", required=True)
+    parser.add_argument("--output-json", required=True)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    session_input = read_session_input(args.input_json)
+    metadata = session_input.get("metadata") or {}
+    output = asyncio.run(run_session(messages=session_input["messages"], metadata=metadata))
+    write_session_output(args.output_json, output)
+
+
+if __name__ == "__main__":
+    main()
