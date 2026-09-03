@@ -56,6 +56,7 @@ class ParsedJudgeResponse:
     verdict: str
     rationale: str
     raw_output_sha256: str
+    diagnostic_snippet: str
 
 
 def _default_token_counter(value: str) -> int:
@@ -462,6 +463,7 @@ def build_turn_reasoning_projection(
 
 def parse_judge_response(raw_output: str, *, component: str) -> ParsedJudgeResponse:
     digest = hashlib.sha256(raw_output.encode("utf-8", errors="replace")).hexdigest()
+    snippet = raw_output[:2048]
 
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -500,6 +502,7 @@ def parse_judge_response(raw_output: str, *, component: str) -> ParsedJudgeRespo
         verdict=value["verdict"],
         rationale=value["rationale"],
         raw_output_sha256=digest,
+        diagnostic_snippet=snippet,
     )
 
 

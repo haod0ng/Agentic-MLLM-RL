@@ -7,10 +7,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-RELAX_REPO_DIR="${RELAX_REPO_DIR:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
-WORK_ROOT="${WORK_ROOT:-${SCRATCH:-${TMPDIR:-/tmp}}/mobilegym_e2e}"
-RELAX_ENV_ROOT="${RELAX_ENV_ROOT:-${WORK_ROOT}/g2_relax_env_te214_sm90_cuda13_v2}"
+RELAX_REPO_DIR="${RELAX_REPO_DIR:-/users/${USER}/haodong/framework/Relax}"
+RELAX_ENV_ROOT="${RELAX_ENV_ROOT:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/g2_relax_env_te214_sm90_cuda13_v2}"
 VENV_BIN="${RELAX_ENV_ROOT}/relax_venv/bin"
 VENV_SITE="$("${VENV_BIN}/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 CUDNN_LIB_DIR="${RELAX_ENV_ROOT}/relax_venv/lib/python3.12/site-packages/nvidia/cudnn/lib"

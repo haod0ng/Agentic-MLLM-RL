@@ -2,15 +2,20 @@
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 #
-# Slurm/EDF reference submission for the MobileGym dual-Judge pipeline.
-# The historical topology used four GPUs per node. Site account, reservation,
-# partition, image, filesystem, and gateway settings must be supplied by the
-# caller; this file deliberately contains no cluster-specific identifiers.
+# Alps/clariden sbatch submission for the MobileGym x dual-judge Phase 0
+# end-to-end pipeline: 4 GH200 nodes (16 GPUs), fully-async, both dual-judge
+# Judges on dedicated GPUs. Adapted from test_scripts/template.sh's SBATCH
+# conventions (account/reservation), but drives scripts/entrypoint/
+# spmd-multinode.sh (unmodified, one task per node) inside a CSCS EDF
+# container instead of raw NCCL microbenchmarks -- see
+# https://docs.cscs.ch/alps/hardware/#nvidia-gh200-gpu-nodes (4 GH200 GPUs
+# per node) and the "Multi-node" section of .claude/skills/dev/SKILL.md.
 #
 # Usage (run from the SAME login node that is running the nginx gateway --
 # MOBILEGYM_ENV_URL=https://$(hostname):4180 captures that node's hostname at
 # submit time; compute nodes cannot reach the login node via "localhost", but
-# its externally supplied address must be routable from every compute node):
+# its plain hostname and hsn0-3/nmn0 addresses are all cluster-routable --
+# see examples/mobilegym_agentic/README.md):
 #   sbatch --time=00:30:00 -p debug --nodes=1 \
 #     --export=ALL,NUM_ROLLOUT=1,REASONING_TRIGGER=terminal_once,DEBUG_ROLLOUT_ONLY=1,MOBILEGYM_ENV_URL=https://$(hostname):4180 \
 #     examples/mobilegym_agentic/submit_mobilegym_e2e.sh                 # L1 smoke, 1 node
@@ -27,9 +32,11 @@
 #     --export=ALL,REASONING_TRIGGER=per_turn,NUM_ROLLOUT=3,MOBILEGYM_ENV_URL=https://$(hostname):4180 \
 #     examples/mobilegym_agentic/submit_mobilegym_e2e.sh                 # L3, full 16 GPUs
 
+#SBATCH --account=infra01
+#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --job-name=mobilegym-e2e
-#SBATCH --output=slurm-%x-%j.out
-#SBATCH --error=slurm-%x-%j.err
+#SBATCH --output=/iopsstor/scratch/cscs/%u/mobilegym_e2e/slurmlogs/%x-%j.out
+#SBATCH --error=/iopsstor/scratch/cscs/%u/mobilegym_e2e/slurmlogs/%x-%j.err
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
@@ -54,15 +61,9 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-4}"  # GH200 nodes: 4 GPUs/node (see #SBATCH --g
 #                                  KNOBS                                      #
 ###############################################################################
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-RELAX_REPO_DIR="${RELAX_REPO_DIR:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}"
-WORK_ROOT="${WORK_ROOT:-${SCRATCH:-${TMPDIR:-/tmp}}/mobilegym_e2e}"
-RELAX_ENV_ROOT="${RELAX_ENV_ROOT:-${WORK_ROOT}/g2_relax_env_te214_sm90_cuda13_v2}"
-EDF_TOML="${EDF_TOML:-}"
-if [ -z "${EDF_TOML}" ] || [ ! -f "${EDF_TOML}" ]; then
-    echo "ERROR: EDF_TOML must name a readable container definition." >&2
-    exit 2
-fi
+RELAX_REPO_DIR="${RELAX_REPO_DIR:-/users/${USER}/haodong/framework/Relax}"
+RELAX_ENV_ROOT="${RELAX_ENV_ROOT:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/g2_relax_env_te214_sm90_cuda13_v2}"
+EDF_TOML="${EDF_TOML:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/edf/verl_sglang.toml}"
 # G2-A deliberately starts only the production TP2 ORM and TP2 VLM services.
 # It has no MobileGym browser/endpoint dependency and must occupy exactly one
 # four-GPU node. Normal training remains the default path.
@@ -104,7 +105,7 @@ fi
 HOST_LIB_DIR="${HOST_LIB_DIR:-/usr/lib64}"
 HOST_FONTCONFIG_DIR="${HOST_FONTCONFIG_DIR:-/etc/fonts}"
 HOST_FONTS_DIR="${HOST_FONTS_DIR:-/usr/share/fonts}"
-EXTRA_FONTS_DIR="${EXTRA_FONTS_DIR:-${WORK_ROOT}/fonts}"
+EXTRA_FONTS_DIR="${EXTRA_FONTS_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/fonts}"
 required_host_paths=("${HOST_LIB_DIR}")
 if [ "${G2_JUDGE_TOPOLOGY_ONLY}" != "1" ] && [ "${G3_ROLLOUT8_ONLY}" != "1" ] && [ "${G4_ROLLOUT12_ONLY}" != "1" ] && [ "${G3_ACTOR8_ONLY}" != "1" ]; then
     required_host_paths+=("${HOST_FONTCONFIG_DIR}" "${HOST_FONTS_DIR}" "${EXTRA_FONTS_DIR}")
@@ -130,7 +131,7 @@ fi
 export SGLANG_NUMA_LIBRARY="${SGLANG_NUMA_LIBRARY:-/host_usr_lib64/libnuma.so.1.0.0}"
 export BROWSER_HOST_LIB_DIR="${BROWSER_HOST_LIB_DIR:-/host_usr_lib64}"
 
-MOBILEGYM_REPO_DIR="${MOBILEGYM_REPO_DIR:-${WORK_ROOT}/mobilegym}"
+MOBILEGYM_REPO_DIR="${MOBILEGYM_REPO_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/mobilegym}"
 # MobileGym's bench_env.run needs Playwright + Chromium and must run INSIDE the
 # container, so it uses the same container-built venv as Relax rather than the
 # host-side python3.11 venv (which is not importable in the EDF image).
@@ -139,7 +140,10 @@ MOBILEGYM_PYTHON="${MOBILEGYM_PYTHON:-${RELAX_ENV_ROOT}/relax_venv/bin/python}"
 # where "localhost" is that compute node's own loopback, not the login node
 # running the nginx gateway -- a silent localhost default would fail with a
 # confusing "unreachable" error on every submission. Caller must pass the
-# gateway address explicitly; it must be reachable from every rollout worker.
+# login node's cluster-routable hostname/IP explicitly (confirmed reachable
+# from compute nodes: both the plain hostname, e.g. clariden-ln003, and its
+# hsn0-3 / nmn0 addresses all resolve and respond -- see
+# examples/mobilegym_agentic/README.md).
 if [ "${G2_JUDGE_TOPOLOGY_ONLY}" != "1" ] && [ "${G3_ROLLOUT8_ONLY}" != "1" ] && [ "${G4_ROLLOUT12_ONLY}" != "1" ] && [ "${G3_ACTOR8_ONLY}" != "1" ] && [ -z "${MOBILEGYM_ENV_URL:-}" ]; then
     echo "ERROR: MOBILEGYM_ENV_URL must be set, e.g.:" >&2
     echo '  --export=ALL,MOBILEGYM_ENV_URL=https://'"$(hostname)"':4180,...' >&2
@@ -151,12 +155,12 @@ if [ "${G2_JUDGE_TOPOLOGY_ONLY}" != "1" ] && [ "${G3_ROLLOUT8_ONLY}" != "1" ] &&
     export MOBILEGYM_PYTHON
 fi
 
-export MODEL_DIR="${MODEL_DIR:-${WORK_ROOT}/models}"
-export DATA_DIR="${DATA_DIR:-${WORK_ROOT}/data}"
-export SAVE_DIR="${SAVE_DIR:-${WORK_ROOT}/checkpoints}"
-export EXP_DIR="${EXP_DIR:-${WORK_ROOT}/exp/${SLURM_JOB_ID}}"
+export MODEL_DIR="${MODEL_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/models}"
+export DATA_DIR="${DATA_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/data}"
+export SAVE_DIR="${SAVE_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/checkpoints}"
+export EXP_DIR="${EXP_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/exp/${SLURM_JOB_ID}}"
 # FlashInfer protects generated sampling modules with POSIX file locks.  Its
-# default cache under a shared home can fail under the
+# default cache under $HOME is shared storage on Clariden and fails under the
 # 24-GPU startup fan-out with ENOLCK.  Keep one cache per job on each node's
 # local filesystem so engines on that node can safely share compiled modules,
 # without carrying a warm JIT cache across experimental runs.
@@ -256,7 +260,7 @@ fi
 #                      ONE-TIME RELAX VENV BOOTSTRAP (idempotent)             #
 ###############################################################################
 # Runs once inside the container on the head node only; persists on
-# shared work root so subsequent job submissions can reuse it.
+# /iopsstor so subsequent job submissions (including L2/L3 after L1) skip it.
 
 NODELIST=($(scontrol show hostnames "${SLURM_JOB_NODELIST}"))
 HEAD_NODE="${NODELIST[0]}"
@@ -322,7 +326,7 @@ echo "MASTER_ADDR=${MASTER_ADDR} (head node: ${HEAD_NODE})"
 #                    LAUNCH: ONE TASK PER NODE, INSIDE THE CONTAINER          #
 ###############################################################################
 # Every node runs the exact same command; scripts/entrypoint/spmd-multinode.sh
-# decides head vs
+# (unmodified -- see .claude/skills/dev/SKILL.md "Multi-node") decides head vs
 # worker role by comparing POD_NAME (this node's own IP) against MASTER_ADDR.
 # Only the head node's invocation actually execs RUN_SCRIPT (which does the
 # `ray job submit` against its own local dashboard); workers block in

@@ -300,10 +300,6 @@ class JudgeServiceSpec:
         # shard. Keep the authoritative admission limit at the single GenRM
         # Serve replica instead of treating this client-side value as global.
         scoped.genrm_max_concurrency = self.max_concurrency
-        scoped.genrm_max_input_tokens = self.max_input_tokens
-        scoped.genrm_max_media_items = self.max_media_items
-        scoped.genrm_max_media_total_bytes = self.max_media_total_bytes
-        scoped.genrm_max_pixels_per_item = self.max_pixels_per_item
         scoped.genrm_port_base = self.port_base
         scoped.genrm_port_band_size = JUDGE_PORT_BAND_SIZE
         scoped.genrm_role = self.role

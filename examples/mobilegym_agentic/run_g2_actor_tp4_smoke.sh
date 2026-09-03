@@ -8,6 +8,7 @@
 # G2C_ROOT to verify model/optimizer/RNG checkpoint restoration.
 
 set -euo pipefail
+set -o xtrace
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 if [ -z "${RELAX_ENTRYPOINT_MODE:-}" ]; then

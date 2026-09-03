@@ -29,7 +29,7 @@ def test_mobilegym_task_manifest_is_byte_stable_and_has_sample_seed(tmp_path: Pa
     assert rows[0]["metadata"]["sample_seed"] != rows[1]["metadata"]["sample_seed"]
 
 
-def test_benchmark_config_generator_emits_training_and_reward_preserving_arms(tmp_path: Path) -> None:
+def test_direct_experiment_config_generator_emits_only_two_dual_arms(tmp_path: Path) -> None:
     output_dir = tmp_path / "configs"
     subprocess.run(
         [
@@ -45,13 +45,8 @@ def test_benchmark_config_generator_emits_training_and_reward_preserving_arms(tm
 
     generated = sorted(output_dir.glob("*.json"))
     assert [path.name for path in generated] == [
-        "judge_services_accuracy.json",
-        "judge_services_accuracy_shadow.json",
-        "judge_services_dual.json",
         "judge_services_dual_per_turn.json",
-        "judge_services_dual_shadow.json",
-        "judge_services_dual_shadow_per_turn.json",
-        "judge_services_recorded.json",
+        "judge_services_dual_terminal_once.json",
     ]
     assert {
         (
@@ -60,13 +55,8 @@ def test_benchmark_config_generator_emits_training_and_reward_preserving_arms(tm
         )
         for path in generated
     } == {
-        ("recorded", "terminal_once"),
-        ("accuracy", "terminal_once"),
-        ("accuracy_shadow", "terminal_once"),
         ("dual", "terminal_once"),
         ("dual", "per_turn"),
-        ("dual_shadow", "terminal_once"),
-        ("dual_shadow", "per_turn"),
     }
 
 

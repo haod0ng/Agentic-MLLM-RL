@@ -1,14 +1,10 @@
-# Experimental agentic dual local Judges
+# Agentic dual local judges
 
 This is a two-reward ablation: answer accuracy (Qwen3-32B) and complete multi-turn visual reasoning
 (Qwen2.5-VL). It does **not** implement the Tool-Calling Reward from the Qwen3-VL reward design.
 That design creates the expert target tool-call count offline with Qwen2.5-VL-72B and compares the runtime call count
 against it. The offline target-generation model is therefore outside training's critical path; the runtime count
 comparison would still have a small local cost, but it is intentionally outside this online-model latency study.
-
-This snapshot implements two fixed Judge roles, not arbitrary heterogeneous reward-model fan-out. It assumes a
-trusted, single-tenant Ray cluster; see the repository `SECURITY.md` before deployment. The model identifiers in
-`judge_services.json` are examples. Pin immutable revisions or use audited local checkpoints for an experiment.
 
 Add the following options to an existing agentic training command:
 
@@ -25,9 +21,6 @@ the only GRPO normalization value is `score = 0.8 * answer_accuracy + 0.2 * mult
 judge failure rejects and replaces the entire GRPO group in `accuracy`/`dual`; it is never converted to zero or
 reweighted. In the two shadow modes, the failure is traced but the recorded reward and sample set are retained so
 the systems A/B workload stays paired.
-
-The shadow fallback applies to sample-local `JudgeSampleRejected` failures. Systemic exceptions and invalid
-configuration still fail fast; shadow mode is not a blanket service-failure isolation mechanism.
 
 `--reward-max-concurrency` limits concurrent sample-level reward tasks (default 64) in each rollout process. Within
 one sample, the accuracy and VLM projections run off the resident event loop and both terminal Judge requests are
@@ -85,10 +78,6 @@ only limit.
 The VLM sees assistant tool calls and the following observation/tool messages, including image parts. An environment
 "meta result" must therefore be serialized into that observation message's `content` (or a supported image part);
 arbitrary session/output `metadata` is intentionally not forwarded into a Judge prompt.
-
-For the multimodal service, `max_input_tokens` currently guards serialized text prompt tokens and does not include
-model-specific visual-token expansion. Configure the authoritative SGLang context limit, media count, byte, and pixel
-budgets conservatively and monitor rejected requests.
 
 The config generator keeps the historical five terminal-once files and additionally writes
 `judge_services_dual_per_turn.json` and `judge_services_dual_shadow_per_turn.json`. For the latency comparison, pair

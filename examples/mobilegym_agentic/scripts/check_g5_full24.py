@@ -358,7 +358,7 @@ _BENIGN_TRACEBACK_FINGERPRINT = (
 def _unexplained_tracebacks(log_text: str) -> list[str]:
     # ServeController's periodic GCS resource-usage poll can transiently time
     # out under heavy judge/rollout load and self-recover (observed in job
-    # A historical reference run continued rollout, reward, and training
+    # 3117772: rollout, reward, and training all continued normally right
     # after). Do not treat that one well-understood fingerprint as fatal, but
     # still flag any other traceback verbatim.
     unexplained = []

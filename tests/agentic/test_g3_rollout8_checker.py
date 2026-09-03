@@ -19,7 +19,7 @@ def test_g3_rollout8_checker_recovers_two_node_engine_provenance(tmp_path: Path)
     log_path = exp_dir / "driver.log"
     log_rows = []
     for rank in range(8):
-        host = "192.0.2.1" if rank < 4 else "192.0.2.2"
+        host = "10.0.0.1" if rank < 4 else "10.0.0.2"
         gpu = rank % 4
         log_rows.append(f"bundle {rank:4}, actual_bundle_index: {rank:4}, node: {host}, gpu: {gpu}")
     log_path.parent.mkdir(parents=True)
@@ -27,13 +27,6 @@ def test_g3_rollout8_checker_recovers_two_node_engine_provenance(tmp_path: Path)
 
     sample_dir = exp_dir / "gpu_samples"
     sample_dir.mkdir()
-    workspace = "/tmp/relax-flashinfer/test-run"
-    workspace_dir = exp_dir / "flashinfer_workspace"
-    workspace_dir.mkdir()
-    for host in ("node-a", "node-b"):
-        (workspace_dir / f"{host}.json").write_text(
-            json.dumps({"hostname": host, "workspace": workspace}), encoding="utf-8"
-        )
     for rank in range(8):
         host = "node-a" if rank < 4 else "node-b"
         records = [
@@ -42,9 +35,8 @@ def test_g3_rollout8_checker_recovers_two_node_engine_provenance(tmp_path: Path)
                 "role": "rollout",
                 "engine_rank": rank,
                 "clock_host": host,
-                "server_host": "192.0.2.1" if rank < 4 else "192.0.2.2",
-                "dist_init_addr": f"{'192.0.2.1' if rank < 4 else '192.0.2.2'}:{15002 + rank * 40}",
-                "flashinfer_workspace_base": workspace,
+                "server_host": "10.0.0.1" if rank < 4 else "10.0.0.2",
+                "dist_init_addr": f"{'10.0.0.1' if rank < 4 else '10.0.0.2'}:{15002 + rank * 40}",
                 "nvml_enabled": True,
             },
             {

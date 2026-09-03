@@ -378,7 +378,7 @@ if [ ! -d "${MEGATRON_DIR}/megatron/bridge" ]; then
     mkdir -p "${MEGATRON_DIR}"
     # rsync is not in the EDF image.  `cp -a` normally preserves mode,
     # ownership, SELinux context, and xattrs, but the EDF container's view of
-    # Some shared filesystems reject those metadata operations with EINVAL. Keep the
+    # /iopsstor rejects those metadata operations with EINVAL.  Keep the
     # recursive/link/timestamp semantics while omitting only unsupported
     # metadata; code content and symlink layout remain unchanged.
     cp -a --no-preserve=mode,ownership,context,xattr "${MEGATRON_BRIDGE_DIR}/src/megatron" "${MEGATRON_DIR}/"

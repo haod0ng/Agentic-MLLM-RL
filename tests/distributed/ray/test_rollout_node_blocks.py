@@ -7,21 +7,21 @@ from relax.distributed.ray.utils import propagate_allowlisted_env_vars
 
 
 def test_rollout_node_blocks_accept_two_contiguous_four_gpu_nodes() -> None:
-    mapping = {rank: "192.0.2.1" if rank < 4 else "192.0.2.2" for rank in range(8)}
+    mapping = {rank: "10.0.0.1" if rank < 4 else "10.0.0.2" for rank in range(8)}
 
     _validate_rollout_engine_node_blocks(mapping, rank_offset=0, num_engines_per_node=4)
 
 
 def test_rollout_node_blocks_reject_fragmented_placement_before_engine_init() -> None:
     mapping = {
-        0: "192.0.2.1",
-        1: "192.0.2.1",
-        2: "192.0.2.2",
-        3: "192.0.2.2",
-        4: "192.0.2.2",
-        5: "192.0.2.2",
-        6: "192.0.2.3",
-        7: "192.0.2.3",
+        0: "10.0.0.1",
+        1: "10.0.0.1",
+        2: "10.0.0.2",
+        3: "10.0.0.2",
+        4: "10.0.0.2",
+        5: "10.0.0.2",
+        6: "10.0.0.3",
+        7: "10.0.0.3",
     }
 
     with pytest.raises(RuntimeError, match="ambiguous dist-init addresses"):

@@ -45,10 +45,6 @@ def test_judge_config_builds_role_scoped_legacy_namespace():
     assert scoped.genrm_num_gpus == scoped.genrm_num_gpus_per_engine == 2
     assert scoped.genrm_port_base == 17000
     assert scoped.genrm_max_concurrency == 2
-    assert scoped.genrm_max_input_tokens == 1000
-    assert scoped.genrm_max_media_items == 4
-    assert scoped.genrm_max_media_total_bytes == 1024
-    assert scoped.genrm_max_pixels_per_item == 4096
     assert scoped.offload_rollout is False
 
 

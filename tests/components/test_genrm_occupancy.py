@@ -17,8 +17,6 @@ stubbing happens at all.
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import sys
 import time
 from types import ModuleType, SimpleNamespace
@@ -278,63 +276,3 @@ async def test_generate_server_admission_serializes_role_requests_and_reports_qu
     assert second.timings["server_queue_elapsed_s"] > 0.0
     assert inst._inflight_requests == 0
     assert inst._queued_requests == 0
-
-
-def test_restore_media_rechecks_role_limits_and_integrity():
-    inst = _make_instance()
-    inst._max_media_items = 1
-    inst._max_media_total_bytes = 16
-    raw = b"image-bytes"
-    media_id = f"sha256:{hashlib.sha256(raw).hexdigest()}"
-    encoded = base64.b64encode(raw).decode("ascii")
-    request = SimpleNamespace(
-        media_manifest=[{"media_id": media_id, "size_bytes": len(raw)}],
-        media_blobs={media_id: f"data:image/png;base64,{encoded}"},
-        messages=[{"role": "user", "content": [{"type": "image", "media_id": media_id}]}],
-    )
-
-    messages, image_data = inst._restore_media(request)
-
-    assert messages[0]["content"] == [{"type": "image_url", "image_url": {"url": request.media_blobs[media_id]}}]
-    assert image_data == [encoded]
-
-
-def test_restore_media_rejects_encoded_payload_before_oversized_decode(monkeypatch):
-    inst = _make_instance()
-    inst._max_media_items = 1
-    inst._max_media_total_bytes = 2
-    media_id = f"sha256:{'0' * 64}"
-    request = SimpleNamespace(
-        media_manifest=[{"media_id": media_id, "size_bytes": 2}],
-        media_blobs={media_id: "data:image/png;base64,QUJDREVGRw=="},
-        messages=[{"role": "user", "content": [{"type": "image", "media_id": media_id}]}],
-    )
-
-    import relax.components.genrm as genrm_module
-
-    monkeypatch.setattr(
-        genrm_module.base64,
-        "b64decode",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("oversized payload was decoded")),
-    )
-    with pytest.raises(ValueError, match="invalid media payload"):
-        inst._restore_media(request)
-
-
-@pytest.mark.asyncio
-async def test_generate_enforces_service_input_limit_when_client_requests_more():
-    inst = _make_instance()
-    inst._max_input_tokens = 32
-    inst._restore_media = lambda _request: ([], [])
-    captured = {}
-
-    async def fake_call_engine(_messages, _sampling_params, **kwargs):
-        captured.update(kwargs)
-        return {"text": "ok", "meta_info": {"completion_tokens": 1}}
-
-    inst._call_engine = fake_call_engine
-    request = SimpleNamespace(sampling_params=None, max_input_tokens=4096)
-
-    await inst.generate(request)
-
-    assert captured["max_input_tokens"] == 32

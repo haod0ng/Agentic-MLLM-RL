@@ -64,7 +64,7 @@ def _run_create_placement_group(num_gpus=2, node_group_affinity=True, cluster_re
         # Second call passes a list of get_ip_and_gpu_id futures -> return one
         # (ip, gpu_id) tuple per bundle. First call is pg.ready() (unused).
         if isinstance(arg, list):
-            return [("192.0.2.1", i) for i in range(len(arg))]
+            return [("10.0.0.1", i) for i in range(len(arg))]
         return None
 
     cr_mock = MagicMock(return_value=cluster_resources or {"GPU": 8.0, "CPU": 64.0})
@@ -173,13 +173,13 @@ def test_create_pg_writes_role_tagged_placement_manifest(monkeypatch, tmp_path):
             {
                 "logical_bundle_index": 0,
                 "actual_bundle_index": 0,
-                "node_ip": "192.0.2.1",
+                "node_ip": "10.0.0.1",
                 "physical_gpu_id": 0,
             },
             {
                 "logical_bundle_index": 1,
                 "actual_bundle_index": 1,
-                "node_ip": "192.0.2.1",
+                "node_ip": "10.0.0.1",
                 "physical_gpu_id": 1,
             },
         ],

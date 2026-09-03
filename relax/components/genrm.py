@@ -166,14 +166,6 @@ class GenRM(Base):
         )
         self._drained = asyncio.Event()
         self._drained.set()
-        # The client projection enforces these limits before serialization,
-        # but the service is a separate trust boundary and must not accept a
-        # caller-supplied oversized media envelope. Accuracy is text-only.
-        self._max_media_items = 0 if role == "judge_accuracy" else getattr(config, "genrm_max_media_items", None)
-        self._max_media_total_bytes = (
-            0 if role == "judge_accuracy" else getattr(config, "genrm_max_media_total_bytes", None)
-        )
-        self._max_input_tokens = getattr(config, "genrm_max_input_tokens", None)
 
         # Event-driven request-occupancy integration (exact, no sampling error).
         # `_advance_occupancy` folds the in-flight level held since the last call
@@ -256,19 +248,11 @@ class GenRM(Base):
                     detail={"code": "invalid_media", "message": str(exc)},
                 ) from exc
             # Call SGLang engine via GenRMManager
-            max_input_tokens = request.max_input_tokens
-            service_max_input_tokens = getattr(self, "_max_input_tokens", None)
-            if service_max_input_tokens is not None:
-                max_input_tokens = (
-                    service_max_input_tokens
-                    if max_input_tokens is None
-                    else min(max_input_tokens, service_max_input_tokens)
-                )
             output = await self._call_engine(
                 messages,
                 request.sampling_params,
                 image_data=image_data,
-                max_input_tokens=max_input_tokens,
+                max_input_tokens=request.max_input_tokens,
                 timings=timings,
             )
 
@@ -304,31 +288,7 @@ class GenRM(Base):
         return message.dict()
 
     def _restore_media(self, request: GenerateRequest) -> tuple[list[dict], list[str]]:
-        max_media_items = getattr(self, "_max_media_items", None)
-        max_media_total_bytes = getattr(self, "_max_media_total_bytes", None)
-        if max_media_items is not None and len(request.media_blobs) > max_media_items:
-            raise ValueError(f"media item count={len(request.media_blobs)} exceeds service limit={max_media_items}")
-        manifest: dict[str, dict] = {}
-        total_declared_bytes = 0
-        for item in request.media_manifest:
-            if not isinstance(item, dict):
-                raise ValueError("media manifest entries must be objects")
-            media_id = item.get("media_id")
-            size_bytes = item.get("size_bytes")
-            if not isinstance(media_id, str) or not media_id:
-                raise ValueError("media manifest entry has no media_id")
-            if media_id in manifest:
-                raise ValueError(f"duplicate media manifest entry for {media_id}")
-            if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
-                raise ValueError(f"invalid media size for {media_id}")
-            manifest[media_id] = item
-            total_declared_bytes += size_bytes
-        if set(manifest) != set(request.media_blobs):
-            raise ValueError("media manifest and blob identifiers do not match")
-        if max_media_items is not None and len(manifest) > max_media_items:
-            raise ValueError(f"media item count={len(manifest)} exceeds service limit={max_media_items}")
-        if max_media_total_bytes is not None and total_declared_bytes > max_media_total_bytes:
-            raise ValueError(f"media bytes={total_declared_bytes} exceed service limit={max_media_total_bytes}")
+        manifest = {item.get("media_id"): item for item in request.media_manifest}
         image_data: list[str] = []
         messages = [self._message_dict(message) for message in request.messages]
         for message in messages:
@@ -347,10 +307,6 @@ class GenRM(Base):
                     raise ValueError(f"missing media payload for {media_id!r}")
                 try:
                     header, encoded = data_uri.split(",", 1)
-                    declared_size = item.get("size_bytes")
-                    max_encoded_size = 4 * ((declared_size + 2) // 3)
-                    if len(encoded) > max_encoded_size:
-                        raise ValueError(f"encoded media exceeds declared size for {media_id}")
                     raw = base64.b64decode(encoded, validate=True)
                 except (ValueError, TypeError) as exc:
                     raise ValueError(f"invalid media payload for {media_id}") from exc
@@ -459,10 +415,7 @@ class GenRM(Base):
                 status_code=413,
                 detail={
                     "code": "context_overflow",
-                    "message": (
-                        f"text prompt token count {len(input_ids)} exceeds max_input_tokens={max_input_tokens}; "
-                        "multimodal visual-token expansion is enforced by the model engine"
-                    ),
+                    "message": f"projection token count {len(input_ids)} exceeds max_input_tokens={max_input_tokens}",
                 },
             )
 
@@ -530,7 +483,7 @@ class GenRM(Base):
         """Health check endpoint."""
         try:
             # Check if genRM engines are healthy
-            is_healthy = await asyncio.to_thread(ray.get, self.genrm_manager.health_check.remote())
+            is_healthy = ray.get(self.genrm_manager.health_check.remote())
             return {
                 "status": "healthy" if is_healthy else "unhealthy",
                 "service": self.role,

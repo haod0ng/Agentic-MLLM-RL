@@ -17,8 +17,8 @@
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=128G
 #SBATCH --time=00:45:00
-#SBATCH --output=slurm-%x-%j.out
-#SBATCH --error=slurm-%x-%j.err
+#SBATCH --output=/iopsstor/scratch/cscs/%u/mobilegym_e2e/slurmlogs/%x-%j.out
+#SBATCH --error=/iopsstor/scratch/cscs/%u/mobilegym_e2e/slurmlogs/%x-%j.err
 #SBATCH --no-requeue
 
 set -euo pipefail

@@ -101,8 +101,7 @@ class DualJudgeExecutor:
     @staticmethod
     def _media_payload(context: RewardContextV1, projection: JudgeProjection) -> tuple[list[dict], dict[str, str]]:
         media_ids = set(projection.media_ids)
-        manifest_by_id = {item["media_id"]: item for item in context.media_manifest if item["media_id"] in media_ids}
-        manifest = [manifest_by_id[media_id] for media_id in projection.media_ids]
+        manifest = [item for item in context.media_manifest if item["media_id"] in media_ids]
         blobs = {media_id: context.media_blobs[media_id].data_uri() for media_id in projection.media_ids}
         return manifest, blobs
 
@@ -559,6 +558,7 @@ class DualJudgeExecutor:
                     "projection_hash": accuracy_projection.projection_hash,
                     "prompt_version": accuracy_projection.prompt_version,
                     "raw_output_sha256": accuracy_result.raw_output_sha256,
+                    "diagnostic_snippet": accuracy_result.diagnostic_snippet,
                 }
             }
             if reasoning_result is not None and reasoning_projection is not None:
@@ -569,6 +569,7 @@ class DualJudgeExecutor:
                     "projection_hash": reasoning_projection.projection_hash,
                     "prompt_version": reasoning_projection.prompt_version,
                     "raw_output_sha256": reasoning_result.raw_output_sha256,
+                    "diagnostic_snippet": reasoning_result.diagnostic_snippet,
                     "truncation": copy.deepcopy(reasoning_projection.truncation),
                 }
             elif use_per_turn_reasoning:

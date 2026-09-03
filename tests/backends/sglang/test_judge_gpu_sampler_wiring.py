@@ -36,10 +36,10 @@ def test_sampler_scrapes_the_bound_sglang_host(monkeypatch, tmp_path):
     engine.rank = 0
     engine.base_gpu_id = 2
     engine.num_gpus_per_engine = 2
-    engine.server_host = "192.0.2.23"
+    engine.server_host = "10.100.48.23"
     engine.server_port = 17000
 
     engine._maybe_start_judge_gpu_sampler()
 
-    assert captured["scrape_url"] == "http://192.0.2.23:17000/metrics"
+    assert captured["scrape_url"] == "http://10.100.48.23:17000/metrics"
     assert captured["started"] is True

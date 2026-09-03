@@ -20,7 +20,7 @@
 # adding the corresponding role back causes advantages to poll TransferQueue
 # for a field nobody produces -- a silent hang, not an error.
 
-set -e
+set -ex
 set -o pipefail
 
 ###############################################################################

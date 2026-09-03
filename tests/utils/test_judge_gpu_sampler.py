@@ -105,8 +105,8 @@ def _make_sampler(tmp_path, *, scrape_url=None, base_gpu_id=4, num_gpus_per_engi
         model_path="/models/fake",
         scrape_url=scrape_url,
         sample_dir=str(tmp_path),
-        server_host="192.0.2.1",
-        dist_init_addr="192.0.2.1:15002",
+        server_host="10.0.0.1",
+        dist_init_addr="10.0.0.1:15002",
         interval_s=interval_s,
     )
 
@@ -315,8 +315,8 @@ def test_start_stop_lifecycle_writes_manifest_and_at_least_one_sample(tmp_path, 
 
     records = _read_jsonl(sampler._file_path())
     assert records[0]["record_type"] == "manifest"
-    assert records[0]["server_host"] == "192.0.2.1"
-    assert records[0]["dist_init_addr"] == "192.0.2.1:15002"
+    assert records[0]["server_host"] == "10.0.0.1"
+    assert records[0]["dist_init_addr"] == "10.0.0.1:15002"
     assert any(record["record_type"] == "sample" for record in records)
     assert records[-1]["record_type"] == "sample"
     assert records[-1]["final_sample"] is True

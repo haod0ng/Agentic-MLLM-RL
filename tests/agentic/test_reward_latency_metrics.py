@@ -130,8 +130,6 @@ def test_agentic_timeline_contains_generation_reward_and_transfer_intervals() ->
         {
             "events": {
                 "chat_request_arrive_at": 88.0,
-                "ir_created_at": 88.25,
-                "ir_activated_at": 88.75,
                 "generation_queue_enter_at": 89.0,
                 "generation_start_at": 90.0,
                 "generation_end_at": 99.0,
@@ -147,9 +145,7 @@ def test_agentic_timeline_contains_generation_reward_and_transfer_intervals() ->
 
     by_name = {event["name"]: event for event in events}
     assert by_name["critical_path.rollout_generation"]["dur"] == 9_000_000
-    assert by_name["critical_path.rollout_admission_setup"]["dur"] == 250_000
-    assert by_name["critical_path.rollout_admission_wait"]["dur"] == 500_000
-    assert by_name["critical_path.rollout_dispatch"]["dur"] == 250_000
+    assert by_name["critical_path.rollout_pre_generation"]["dur"] == 1_000_000
     assert by_name["critical_path.rollout_post_generation"]["dur"] == 500_000
     assert by_name["critical_path.rollout_queue"]["dur"] == 1_000_000
     assert by_name["critical_path.rollout_finalize"]["dur"] == 500_000

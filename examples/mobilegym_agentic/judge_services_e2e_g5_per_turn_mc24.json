@@ -5,7 +5,7 @@
   "turn_judge_barrier_timeout_s": 600,
   "max_group_replacements_per_step": 16,
   "answer_accuracy": {
-    "model_path": "Qwen/Qwen3-4B",
+    "model_path": "/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/models/Qwen3-4B",
     "num_gpus_per_engine": 4,
     "engine_config": {
       "max_context_len": 32768,
@@ -28,7 +28,7 @@
     "port_base": 16000
   },
   "multi_turn_reasoning": {
-    "model_path": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "model_path": "/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/models/Qwen2.5-VL-7B-Instruct",
     "num_gpus_per_engine": 4,
     "engine_config": {
       "max_context_len": 32768,
