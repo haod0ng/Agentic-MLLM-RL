@@ -115,6 +115,7 @@ def test_sync_weight_validation_broadcasts_ray_timeout_before_raising():
 
 def test_sglang_weight_version_request_has_http_timeout():
     pytest.importorskip("sglang_router")
+    pytest.importorskip("sglang.srt.server_args")
     from relax.backends.sglang.sglang_engine import SGLangEngine
 
     engine = SGLangEngine.__new__(SGLangEngine)
@@ -133,6 +134,7 @@ def test_sglang_weight_version_request_has_http_timeout():
 
 def test_sglang_weight_version_falls_back_for_legacy_endpoint():
     pytest.importorskip("sglang_router")
+    pytest.importorskip("sglang.srt.server_args")
     from relax.backends.sglang.sglang_engine import SGLangEngine
 
     engine = SGLangEngine.__new__(SGLangEngine)
