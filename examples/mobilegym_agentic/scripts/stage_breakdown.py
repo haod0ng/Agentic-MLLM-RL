@@ -187,26 +187,32 @@ def build_variant_breakdown(
         raise ValueError(f"{report_path} must contain exactly one variant, found {variant_names}")
     variant = report["variants"][variant_names[0]]
 
-    active_set_percent = variant.get("active_set_percent")
-    if not active_set_percent:
-        raise ValueError(f"{report_path}: report has no active_set_percent (was it produced with --direct?)")
-    stall = stall_decomposition(active_set_percent)
-    stall_sum = sum(stall.values())
-    if abs(stall_sum - 100.0) > 0.5:
-        raise ValueError(f"{report_path}: stall decomposition sums to {stall_sum:.2f}%, expected ~100%")
-
     events, source = analyze_latency.load_variant_events(timeline_path, include_rollout_with_timeline=False)
     if source != "timeline":
         raise ValueError(f"{timeline_path}: expected a timeline directory, got source={source!r}")
     window, _measured_steps, _boundary_step = analyze_latency._fixed_k_window(
         events, warmup_updates=warmup_rounds, measure_updates=measure_rounds
     )
+    active_set_percent = variant.get("active_set_percent")
+    if not active_set_percent:
+        # Standalone ``--direct`` reports intentionally retain only inclusive
+        # occupancy.  Recompute the exact overlap partition from the same
+        # normalized timeline and fixed ready-to-ready window; this preserves
+        # the original coincidence semantics without manufacturing causality.
+        durations = analyze_latency._active_set_durations(events, window)
+        window_s = window[1] - window[0]
+        active_set_percent = {label: 100.0 * duration / window_s for label, duration in durations.items()}
+    stall = stall_decomposition(active_set_percent)
+    stall_sum = sum(stall.values())
+    if abs(stall_sum - 100.0) > 0.5:
+        raise ValueError(f"{report_path}: stall decomposition sums to {stall_sum:.2f}%, expected ~100%")
     reward_split = reward_component_split(events, window)
 
     gpu = gpu_idle_table(variant.get("judge_gpu_efficiency"), variant.get("judge_gpu_efficiency_issues"))
 
     return {
-        "reasoning_trigger": variant.get("observed_reasoning_trigger"),
+        "reasoning_trigger": variant.get("observed_reasoning_trigger")
+        or next(iter(variant.get("observed_reasoning_triggers") or []), None),
         "benchmark_invariant_hash": variant.get("benchmark_invariant_hash"),
         "window_s": window[1] - window[0],
         "stall_decomposition_pct": dict(sorted(stall.items(), key=lambda kv: -kv[1])),

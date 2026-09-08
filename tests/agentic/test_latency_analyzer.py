@@ -79,6 +79,7 @@ def test_latency_analyzer_does_not_classify_evaluation_as_generation():
     assert _stage_for_event("critical_path.rollout_queue") == "rollout_queue"
     assert _stage_for_event("critical_path.optimizer_step") == "training"
     assert _stage_for_event("critical_path.weight_gate_wait") == "weight_gate_wait"
+    assert _stage_for_event("critical_path.weight_version_validation") == "weight_validation"
     assert _stage_for_event("critical_path.turn_judge") == "turn_judge"
     assert _stage_for_event("critical_path.judge_request") == "request"
     assert _stage_for_event("critical_path.session_terminal_admission") == "rollout_orchestration"
@@ -107,6 +108,7 @@ def test_direct_analyzer_recovers_request_to_trainer_dependency_chain():
     events = [
         _event("critical_path.weight_serving_ready", "weight_update", 0.0, 1.0, 0),
         _event("critical_path.weight_serving_ready", "weight_update", 10.0, 11.0, 1),
+        _event("critical_path.weight_version_validation", "weight_validation", 8.0, 9.0, 1),
         {
             **_event("critical_path.session_terminal_admission", "rollout_orchestration", 2.0, 2.0, 1),
             "attributes": attributes,
@@ -143,6 +145,7 @@ def test_direct_analyzer_recovers_request_to_trainer_dependency_chain():
     assert report["trainer"]["exclusive_reward_wait_s"]["p50_s"] == pytest.approx(1.0)
     assert report["trainer"]["reward_plus_other_blocker_wait_s"]["p50_s"] == pytest.approx(1.0)
     assert report["window_s"] == pytest.approx([2.0, 11.0])
+    assert report["stage_occupancy_s"]["weight_validation"] == pytest.approx(1.0)
     assert report["publication"]["per_step"] == [
         {
             "step": 1,

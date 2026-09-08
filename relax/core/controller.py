@@ -56,7 +56,11 @@ def _needs_rollout_manager_setup(serve_dict: dict) -> bool:
 
 def _is_colocate(config: Namespace) -> bool:
     """True when actor/rollout (and optionally critic) share GPUs."""
-    return not getattr(config, "fully_async", False) and not getattr(config, "hybrid", False)
+    return (
+        bool(getattr(config, "colocate", False))
+        and not getattr(config, "fully_async", False)
+        and not getattr(config, "hybrid", False)
+    )
 
 
 logger = get_logger(__name__)

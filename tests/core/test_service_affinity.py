@@ -51,13 +51,20 @@ def test_markers_appear_on_retry():
         _require_node_group_markers("stable", retries=3, retry_delay=0.01)  # no raise
 
 
-def _run_create_placement_group(num_gpus=2, node_group_affinity=True, cluster_resources=None, role=None):
+def _run_create_placement_group(
+    num_gpus=2,
+    node_group_affinity=True,
+    cluster_resources=None,
+    role=None,
+    is_sync_dedicated=False,
+):
     """Create a placement group against a mocked Ray runtime."""
     captured = {}
 
-    def _fake_placement_group(bundles, strategy="PACK"):
+    def _fake_placement_group(bundles, strategy="PACK", bundle_label_selector=None):
         captured["bundles"] = bundles
         captured["strategy"] = strategy
+        captured["bundle_label_selector"] = bundle_label_selector
         return MagicMock(name="pg")
 
     def _fake_ray_get(arg, timeout=None):
@@ -79,9 +86,13 @@ def _run_create_placement_group(num_gpus=2, node_group_affinity=True, cluster_re
         patch("relax.core.service.ray.kill", MagicMock()),
         patch("relax.core.service.ray.cluster_resources", cr_mock),
         patch("relax.core.service.time.sleep"),
+        patch("relax.core.service._require_bundle_label_selector_support"),
     ):
         pg, reordered_indices, reordered_gpu_ids = create_placement_group(
-            num_gpus, node_group_affinity=node_group_affinity, role=role
+            num_gpus,
+            node_group_affinity=node_group_affinity,
+            role=role,
+            is_sync_dedicated=is_sync_dedicated,
         )
     return captured, cr_mock
 
@@ -158,6 +169,45 @@ def test_create_pg_no_env_is_plain_unconstrained(monkeypatch):
     assert cr_mock.call_count == 0
 
 
+def test_sync_dedicated_pg_selects_role_label(monkeypatch):
+    monkeypatch.delenv("RELAX_INITIAL_NODE_GROUP", raising=False)
+    captured, _ = _run_create_placement_group(
+        num_gpus=2,
+        node_group_affinity=False,
+        role="judge_accuracy",
+        is_sync_dedicated=True,
+    )
+
+    assert captured["bundle_label_selector"] == [{"relax_role": "judge_accuracy"}] * 2
+
+
+def test_sync_dedicated_pg_rejects_unknown_role(monkeypatch):
+    with pytest.raises(ValueError, match="known dedicated role"):
+        _run_create_placement_group(
+            num_gpus=1,
+            node_group_affinity=False,
+            role="critic",
+            is_sync_dedicated=True,
+        )
+
+
+def test_sync_dedicated_pg_requires_ray_label_selector_support():
+    def _legacy_placement_group(bundles, strategy="PACK"):
+        raise AssertionError("unsupported Ray API must fail before placement")
+
+    with (
+        patch("relax.core.service.device_utils.get_ray_accelerator_name", return_value="GPU"),
+        patch("relax.core.service.placement_group", side_effect=_legacy_placement_group),
+        pytest.raises(RuntimeError, match="bundle_label_selector"),
+    ):
+        create_placement_group(
+            num_gpus=1,
+            node_group_affinity=False,
+            role="actor",
+            is_sync_dedicated=True,
+        )
+
+
 def test_create_pg_writes_role_tagged_placement_manifest(monkeypatch, tmp_path):
     monkeypatch.delenv("RELAX_INITIAL_NODE_GROUP", raising=False)
     monkeypatch.setenv("RELAX_PLACEMENT_MANIFEST_DIR", str(tmp_path))
@@ -184,6 +234,20 @@ def test_create_pg_writes_role_tagged_placement_manifest(monkeypatch, tmp_path):
             },
         ],
     }
+
+
+def test_sync_dedicated_manifest_records_label_selector(monkeypatch, tmp_path):
+    monkeypatch.setenv("RELAX_PLACEMENT_MANIFEST_DIR", str(tmp_path))
+
+    _run_create_placement_group(
+        num_gpus=2,
+        node_group_affinity=False,
+        role="rollout",
+        is_sync_dedicated=True,
+    )
+
+    payload = json.loads((tmp_path / "rollout.json").read_text(encoding="utf-8"))
+    assert payload["node_label_selector"] == {"relax_role": "rollout"}
 
 
 def test_create_pg_timeout_removes_new_placement_group():
@@ -239,13 +303,23 @@ def test_service_forwards_enable_affinity_false():
     """config.enable_affinity=False -> create_placement_group is called with
     node_group_affinity=False (the escape valve, independent of env)."""
     mock_cpg = _build_service(Namespace(enable_affinity=False))
-    mock_cpg.assert_called_once_with(num_gpus=2, node_group_affinity=False, role="actor")
+    mock_cpg.assert_called_once_with(
+        num_gpus=2,
+        node_group_affinity=False,
+        is_sync_dedicated=False,
+        role="actor",
+    )
 
 
 def test_service_forwards_enable_affinity_true():
     """config.enable_affinity=True -> node_group_affinity=True."""
     mock_cpg = _build_service(Namespace(enable_affinity=True))
-    mock_cpg.assert_called_once_with(num_gpus=2, node_group_affinity=True, role="actor")
+    mock_cpg.assert_called_once_with(
+        num_gpus=2,
+        node_group_affinity=True,
+        is_sync_dedicated=False,
+        role="actor",
+    )
 
 
 def test_dedicated_judge_uses_strict_pack():
@@ -261,7 +335,11 @@ def test_dedicated_judge_uses_strict_pack():
             num_gpus=2,
         )
     mock_cpg.assert_called_once_with(
-        num_gpus=2, node_group_affinity=True, strategy="STRICT_PACK", role="judge_accuracy"
+        num_gpus=2,
+        node_group_affinity=True,
+        is_sync_dedicated=False,
+        strategy="STRICT_PACK",
+        role="judge_accuracy",
     )
 
 

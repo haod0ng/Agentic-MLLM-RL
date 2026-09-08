@@ -465,6 +465,21 @@ def parse_judge_response(raw_output: str, *, component: str) -> ParsedJudgeRespo
     digest = hashlib.sha256(raw_output.encode("utf-8", errors="replace")).hexdigest()
     snippet = raw_output[:2048]
 
+    # Qwen judge checkpoints commonly wrap an otherwise valid JSON response in
+    # one Markdown ``json`` fence, even when the prompt asks for a bare object.
+    # Accept exactly that transport wrapper while continuing to reject prose,
+    # multiple objects, or an unclosed/mixed fence.  The audited digest and
+    # diagnostic snippet remain based on the raw model output.
+    candidate = raw_output.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if len(lines) < 3 or lines[0].strip().lower() not in {"```", "```json"} or lines[-1].strip() != "```":
+            raise InvalidJudgeResponse("judge output must be one complete strict JSON object")
+        inner = "\n".join(lines[1:-1]).strip()
+        if not inner or "```" in inner:
+            raise InvalidJudgeResponse("judge output must be one complete strict JSON object")
+        candidate = inner
+
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, item in pairs:
@@ -475,7 +490,7 @@ def parse_judge_response(raw_output: str, *, component: str) -> ParsedJudgeRespo
 
     try:
         value = json.loads(
-            raw_output,
+            candidate,
             parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
             object_pairs_hook=reject_duplicate_keys,
         )
@@ -487,8 +502,15 @@ def parse_judge_response(raw_output: str, *, component: str) -> ParsedJudgeRespo
         raise InvalidJudgeResponse("verdict and rationale must be strings")
     score = value["score"]
     if component == "answer_accuracy":
-        if isinstance(score, bool) or not isinstance(score, int) or score not in {0, 1}:
-            raise InvalidJudgeResponse("answer_accuracy score must be integer 0 or 1")
+        # Some instruction-tuned judge checkpoints serialize an integral
+        # binary score as ``0.0``/``1.0``.  It is still the same binary
+        # contract; normalize only finite exact 0/1 values and reject all
+        # fractional or non-numeric scores.
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            raise InvalidJudgeResponse("answer_accuracy score must be numeric 0 or 1")
+        if not math.isfinite(float(score)) or float(score) not in {0.0, 1.0}:
+            raise InvalidJudgeResponse("answer_accuracy score must be numeric 0 or 1")
+        score = int(score)
     elif component == "multi_turn_reasoning":
         if isinstance(score, bool) or not isinstance(score, (int, float)):
             raise InvalidJudgeResponse("multi_turn_reasoning score must be a number")

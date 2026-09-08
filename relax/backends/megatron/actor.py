@@ -48,6 +48,7 @@ from relax.utils.data.stream_dataloader import (
     get_data_from_transfer_queue,
     post_process_rollout_data,
 )
+from relax.utils.data.transfer_provenance import extract_data_wait_provenance
 from relax.utils.distributed_utils import get_gloo_group
 from relax.utils.env import Envs
 from relax.utils.memory_utils import clear_memory, print_memory
@@ -96,6 +97,7 @@ from .weight_update.common import named_params_and_buffers
 from .weight_update.train_offload import MegatronTrainStateOffloader
 from .weight_update.update_weight_from_distributed import UpdateWeightFromDistributed
 from .weight_update.update_weight_from_tensor import UpdateWeightFromTensor
+from .weight_update.validation import validate_rollout_engine_weight_versions
 
 
 logging.getLogger("megatron").setLevel(logging.WARNING)
@@ -191,6 +193,53 @@ def _mark_critical_path_milestone(name: str) -> tuple[float, int]:
     monotonic_ns = time.perf_counter_ns()
     Timer().add_complete_span(name, start_wall_s=marked_at, end_wall_s=marked_at, duration_s=0.0)
     return marked_at, monotonic_ns
+
+
+def _record_data_wait_span(
+    *,
+    start_wall_s: float,
+    start_monotonic_ns: int,
+    rollout_data: RolloutBatch | None,
+    batch_meta: Any,
+    partition_id: str,
+    task_name: str,
+    dp_rank: int,
+    batch_index: int,
+    required_provenance: bool,
+) -> None:
+    """Record one legacy TQ fetch with the rows returned to the trainer.
+
+    The streaming iterator already records this provenance itself.  The non-
+    streaming Megatron paths use an explicit polling loop, so recording here
+    keeps their timeline events equally attributable without leaving empty
+    polls indistinguishable from successful trainer fetches.
+    """
+    if rollout_data is None:
+        attributes: dict[str, Any] = {
+            "returned_batch": False,
+            "batch_status": "empty_poll",
+            "partition_id": partition_id,
+            "task_name": task_name,
+            "dp_rank": int(dp_rank),
+            "batch_index": int(batch_index),
+        }
+    else:
+        attributes = extract_data_wait_provenance(
+            batch_meta,
+            partition_id=partition_id,
+            task_name=task_name,
+            dp_rank=dp_rank,
+            batch_index=batch_index,
+            required=required_provenance,
+        )
+    ended_ns = time.perf_counter_ns()
+    Timer().add_complete_span(
+        "critical_path.data_wait",
+        start_wall_s=start_wall_s,
+        end_wall_s=time.time(),
+        duration_s=(ended_ns - start_monotonic_ns) / 1e9,
+        attributes=attributes,
+    )
 
 
 def _split_by_rollout_mini_counts(values: Any, counts: list[int]) -> list[Any]:
@@ -795,6 +844,9 @@ class MegatronTrainRayActor(TrainRayActor):
                 task_name = f"{base_task_name}_critic"
             else:
                 task_name = base_task_name
+            partition_id = sft_partition_id(self.args, rollout_id)
+            dp_rank = mpu.get_data_parallel_rank(with_context_parallel=False)
+            required_provenance = getattr(self.args, "rm_type", None) == "dual-agentic-judge"
             empty_poll_sleep_s = Envs.RELAX_EMPTY_POLL_SLEEP_MS / 1000.0
             rollout_mini_batches: list[RolloutBatch] = []
             rollout_mini_batch_metas: list = []
@@ -803,10 +855,23 @@ class MegatronTrainRayActor(TrainRayActor):
             while batch_index < num_rollout_minis and not self.all_consumed(task_name, rollout_id):
                 consumer = "critic" if self.role == "critic" else "actor"
                 data_fields = build_data_fields(self.args, consumer=consumer)
-                with span_timer("critical_path.data_wait"), timer("train_get_data"):
+                wait_started_at = time.time()
+                wait_started_ns = time.perf_counter_ns()
+                with timer("train_get_data"):
                     rollout_data, batch_meta = self._get_data_from_transfer_queue(
                         task_name, rollout_id, data_fields, batch_size, batch_index
                     )
+                _record_data_wait_span(
+                    start_wall_s=wait_started_at,
+                    start_monotonic_ns=wait_started_ns,
+                    rollout_data=rollout_data,
+                    batch_meta=batch_meta,
+                    partition_id=partition_id,
+                    task_name=task_name,
+                    dp_rank=dp_rank,
+                    batch_index=batch_index,
+                    required_provenance=required_provenance,
+                )
                 if rollout_data is None:
                     if fetch_iter % 100 == 0:
                         logger.info(
@@ -816,7 +881,17 @@ class MegatronTrainRayActor(TrainRayActor):
                         )
                     fetch_iter += 1
                     if empty_poll_sleep_s > 0:
-                        with span_timer("critical_path.data_wait"):
+                        with span_timer(
+                            "critical_path.data_wait",
+                            attributes={
+                                "returned_batch": False,
+                                "batch_status": "empty_poll_sleep",
+                                "partition_id": partition_id,
+                                "task_name": task_name,
+                                "dp_rank": int(dp_rank),
+                                "batch_index": int(batch_index),
+                            },
+                        ):
                             time.sleep(empty_poll_sleep_s)
                     continue
                 batch_index += 1
@@ -1093,6 +1168,9 @@ class MegatronTrainRayActor(TrainRayActor):
             if has_rollout:
                 with span_timer("critical_path.weight_update"):
                     self.update_weights()
+                if getattr(self.args, "is_sync_dedicated", False):
+                    with span_timer("critical_path.weight_version_validation"):
+                        self.validate_rollout_engine_weight_versions()
                 serving_ready_at, serving_ready_ns = _mark_critical_path_milestone(
                     "critical_path.weight_serving_ready"
                 )
@@ -1404,6 +1482,9 @@ class MegatronTrainRayActor(TrainRayActor):
                 rollout_mini_local_sample_counts.append(len(sub_batch["total_lengths"]))
         else:
             batch_index = 0
+            partition_id = sft_partition_id(self.args, rollout_id)
+            dp_rank = mpu.get_data_parallel_rank(with_context_parallel=False)
+            required_provenance = getattr(self.args, "rm_type", None) == "dual-agentic-judge"
             # Surface stuck-loop conditions: when the partition can never reach the
             # requested batch_size (e.g. rollout dropped samples without refilling),
             # `get_meta` keeps returning size=0 while `all_consumed` stays False,
@@ -1427,10 +1508,23 @@ class MegatronTrainRayActor(TrainRayActor):
                     data_fields.append("multimodal_train_inputs")
                 if self.args.use_opd and self.args.opd_type == "sglang":
                     data_fields.append("teacher_log_probs")
-                with span_timer("critical_path.data_wait"), timer("train_get_data"):
+                wait_started_at = time.time()
+                wait_started_ns = time.perf_counter_ns()
+                with timer("train_get_data"):
                     sub_batch, batch_meta = self._get_data_from_transfer_queue(
                         "train", rollout_id, data_fields, batch_size, batch_index
                     )
+                _record_data_wait_span(
+                    start_wall_s=wait_started_at,
+                    start_monotonic_ns=wait_started_ns,
+                    rollout_data=sub_batch,
+                    batch_meta=batch_meta,
+                    partition_id=partition_id,
+                    task_name="train",
+                    dp_rank=dp_rank,
+                    batch_index=batch_index,
+                    required_provenance=required_provenance,
+                )
                 if sub_batch is None:
                     now = time.monotonic()
                     stalled = now - last_progress
@@ -1443,7 +1537,17 @@ class MegatronTrainRayActor(TrainRayActor):
                         last_warn = now
                     # Throttle the spin so the controller is not hammered with metadata
                     # polls while we wait for upstream data.
-                    with span_timer("critical_path.data_wait"):
+                    with span_timer(
+                        "critical_path.data_wait",
+                        attributes={
+                            "returned_batch": False,
+                            "batch_status": "empty_poll_sleep",
+                            "partition_id": partition_id,
+                            "task_name": "train",
+                            "dp_rank": int(dp_rank),
+                            "batch_index": int(batch_index),
+                        },
+                    ):
                         time.sleep(0.1)
                     continue
                 last_progress = time.monotonic()
@@ -1811,9 +1915,12 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.update_weights()
             print_memory("after update_weights", clear_before_print=not device_utils.is_npu_available)
 
-            if self.args.ci_test and len(rollout_engines) > 0:
+            if self.args.ci_test and not getattr(self.args, "is_sync_dedicated", False) and rollout_engines:
                 engine = random.choice(rollout_engines)
-                engine_version = ray.get(engine.get_weight_version.remote())
+                engine_version = ray.get(
+                    engine.get_weight_version.remote(timeout=self.args.rollout_http_timeout),
+                    timeout=self.args.rollout_http_timeout,
+                )
                 if str(engine_version) != str(self.weight_updater.weight_version):
                     raise RuntimeError(
                         f"Weight version mismatch! Engine: {engine_version}, Updater: {self.weight_updater.weight_version}"
@@ -1849,6 +1956,24 @@ class MegatronTrainRayActor(TrainRayActor):
                 post_sync_handles.append(self.genrm_manager.onload.remote())
             if post_sync_handles:
                 ray.get(post_sync_handles)
+
+    def validate_rollout_engine_weight_versions(self) -> None:
+        """Validate all rollout replicas after publication, outside update
+        timing.
+
+        Only rank 0 performs Ray RPCs.  Every training rank participates in the
+        explicit Gloo broadcast so a timeout or mismatch fails the whole actor
+        group at the same synchronous boundary.
+        """
+        if not getattr(self.args, "is_sync_dedicated", False):
+            return
+
+        validate_rollout_engine_weight_versions(
+            args=self.args,
+            rollout_manager=self.rollout_manager,
+            expected_version=str(self.weight_updater.weight_version),
+            process_group=get_gloo_group(),
+        )
 
     @timer("wait update_weights_fully_async")
     def _check_services_health(self) -> tuple[bool, bool]:

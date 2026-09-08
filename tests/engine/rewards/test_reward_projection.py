@@ -130,7 +130,9 @@ def test_turn_reasoning_projection_is_bounded_to_one_completed_interaction():
     ("raw", "component"),
     [
         ('{"score":"1","verdict":"pass","rationale":"x"}', "answer_accuracy"),
-        ('```json\n{"score":1,"verdict":"pass","rationale":"x"}\n```', "answer_accuracy"),
+        ('{"score":0.5,"verdict":"pass","rationale":"x"}', "answer_accuracy"),
+        ('prefix\n```json\n{"score":1,"verdict":"pass","rationale":"x"}\n```', "answer_accuracy"),
+        ('```json\n{"score":1,"verdict":"pass","rationale":"x"}', "answer_accuracy"),
         ('{"score":true,"verdict":"pass","rationale":"x"}', "answer_accuracy"),
         ('{"score":NaN,"verdict":"pass","rationale":"x"}', "multi_turn_reasoning"),
         ('{"score":1.1,"verdict":"pass","rationale":"x"}', "multi_turn_reasoning"),
@@ -144,6 +146,16 @@ def test_strict_parser_rejects_non_contract_outputs(raw: str, component: str):
 
 def test_parser_boundaries_and_fixed_aggregation():
     assert parse_judge_response('{"score":0,"verdict":"fail","rationale":"x"}', component="answer_accuracy").score == 0
+    assert (
+        parse_judge_response('{"score":1.0,"verdict":"pass","rationale":"x"}', component="answer_accuracy").score == 1
+    )
+    assert (
+        parse_judge_response(
+            '```json\n{"score":1,"verdict":"pass","rationale":"x"}\n```',
+            component="answer_accuracy",
+        ).score
+        == 1
+    )
     assert (
         parse_judge_response('{"score":0.5,"verdict":"mixed","rationale":"x"}', component="multi_turn_reasoning").score
         == 0.5

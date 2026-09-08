@@ -42,7 +42,8 @@ repos:
           - linkify-it-py
         exclude: |
             (?x)^(
-                skills/.* | .opencode/.* | docs/.*
+                skills/.* | .opencode/.* | docs/.* |
+                examples/mobilegym_agentic/LATENCY_FINDINGS\.md
             )$
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v14.0.6

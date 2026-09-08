@@ -58,7 +58,10 @@ def _validate_flashinfer_workspace() -> str | None:
         raise RuntimeError(f"FLASHINFER_WORKSPACE_BASE is not a directory in SGLangEngine: {workspace}")
     probe = workspace / ".relax_actor_flock_probe"
     with probe.open("a+b") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Every engine rank on a node validates the same shared workspace at
+        # startup.  This probe is intentionally serialized: LOCK_NB turns a
+        # harmless concurrent validation into an engine-init failure.
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
     logger.info(f"Validated actor-local FlashInfer workspace: {workspace}")
     return str(workspace)
@@ -975,13 +978,33 @@ class SGLangEngine(RayActor):
         """Return the engine rank assigned during __init__."""
         return self.rank
 
-    def get_weight_version(self) -> Optional[str]:
+    def get_weight_version(self, timeout: float | None = None) -> Optional[str]:
         if self.node_rank != 0:
             return
-        url = f"http://{self.server_host}:{self.server_port}/get_weight_version"
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()["weight_version"]
+        request_timeout = timeout if timeout is not None else self.args.rollout_http_timeout
+        # SGLang removed the deprecated /get_weight_version and /weight_version
+        # aliases in favor of /model_info.  Keep the aliases as fallbacks for
+        # older Relax-patched images so rollout validation is version-agnostic.
+        last_response = None
+        for endpoint in ("model_info", "weight_version", "get_weight_version"):
+            url = f"http://{self.server_host}:{self.server_port}/{endpoint}"
+            response = requests.get(url, timeout=request_timeout)
+            last_response = response
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            if "weight_version" not in payload:
+                raise RuntimeError(f"SGLang /{endpoint} response has no weight_version field")
+            return payload["weight_version"]
+
+        # Preserve the normal requests.HTTPError contract when none of the
+        # compatibility routes exists, rather than silently accepting an
+        # unverifiable publication.
+        if last_response is None:
+            raise RuntimeError("SGLang weight-version request produced no response")
+        last_response.raise_for_status()
+        raise RuntimeError("SGLang exposes no weight-version endpoint")
 
     def release_memory_occupation(self):
         self.flush_cache()
@@ -1171,8 +1194,26 @@ class GenRMEngine(SGLangEngine):
             return addr
 
         host = _format_v6_uri(host)
-        ip_part, port_part = dist_init_addr.rsplit(":", 1)
-        dist_init_addr = f"{_format_v6_uri(ip_part)}:{port_part}"
+        if dist_init_addr is not None:
+            ip_part, port_part = dist_init_addr.rsplit(":", 1)
+            dist_init_addr = f"{_format_v6_uri(ip_part)}:{port_part}"
+
+        # SGLang's plain-DP launcher creates one TCPStore per DP replica and
+        # derives each replica's rendezvous port from its per-DP ``nccl_port``.
+        # Passing one shared ``dist_init_addr`` on a single node makes every
+        # replica attempt to bind the same TCPStore port (EADDRINUSE).  The
+        # address is still required for a multi-node TP group, so only elide it
+        # for the single-node DP case.  This keeps TP=2, DP=2 on the four
+        # dedicated PRM GPUs while avoiding the SGLang startup race.
+        genrm_dp_size = int((self.args.genrm_engine_config or {}).get("dp_size", 1))
+        genrm_nodes = max(1, self.args.genrm_num_gpus_per_engine // self.args.num_gpus_per_node)
+        if genrm_dp_size > 1 and genrm_nodes == 1:
+            dist_init_addr = None
+            # SGLang's plain-DP PortArgs.init_new copies an explicit
+            # server_args.nccl_port into every DP worker.  That makes both
+            # replicas bind the same TCPStore port before their TP groups
+            # start.  Let each worker choose its own checked-free NCCL port.
+            nccl_port = None
         self.dist_init_addr = dist_init_addr
 
         server_args_dict, external_engine_need_check_fields = _compute_genrm_server_args(

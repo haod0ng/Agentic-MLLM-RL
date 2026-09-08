@@ -2,20 +2,14 @@
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 #
-# Alps/clariden sbatch submission for the MobileGym x dual-judge Phase 0
+# Slurm sbatch submission for the MobileGym x dual-judge Phase 0
 # end-to-end pipeline: 4 GH200 nodes (16 GPUs), fully-async, both dual-judge
 # Judges on dedicated GPUs. Adapted from test_scripts/template.sh's SBATCH
-# conventions (account/reservation), but drives scripts/entrypoint/
-# spmd-multinode.sh (unmodified, one task per node) inside a CSCS EDF
-# container instead of raw NCCL microbenchmarks -- see
-# https://docs.cscs.ch/alps/hardware/#nvidia-gh200-gpu-nodes (4 GH200 GPUs
-# per node) and the "Multi-node" section of .claude/skills/dev/SKILL.md.
+# conventions, but drives scripts/entrypoint/spmd-multinode.sh (one task per
+# node) inside a Slurm container instead of raw NCCL microbenchmarks.
 #
-# Usage (run from the SAME login node that is running the nginx gateway --
-# MOBILEGYM_ENV_URL=https://$(hostname):4180 captures that node's hostname at
-# submit time; compute nodes cannot reach the login node via "localhost", but
-# its plain hostname and hsn0-3/nmn0 addresses are all cluster-routable --
-# see examples/mobilegym_agentic/README.md):
+# Usage: set MOBILEGYM_ENV_URL to a gateway address routable from the allocated
+# compute nodes; do not use localhost.
 #   sbatch --time=00:30:00 -p debug --nodes=1 \
 #     --export=ALL,NUM_ROLLOUT=1,REASONING_TRIGGER=terminal_once,DEBUG_ROLLOUT_ONLY=1,MOBILEGYM_ENV_URL=https://$(hostname):4180 \
 #     examples/mobilegym_agentic/submit_mobilegym_e2e.sh                 # L1 smoke, 1 node
@@ -32,16 +26,15 @@
 #     --export=ALL,REASONING_TRIGGER=per_turn,NUM_ROLLOUT=3,MOBILEGYM_ENV_URL=https://$(hostname):4180 \
 #     examples/mobilegym_agentic/submit_mobilegym_e2e.sh                 # L3, full 16 GPUs
 
-#SBATCH --account=infra01
-#SBATCH --reservation=SD-69241-apertus-1-5-0
 #SBATCH --job-name=mobilegym-e2e
-#SBATCH --output=/iopsstor/scratch/cscs/%u/mobilegym_e2e/slurmlogs/%x-%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/%u/mobilegym_e2e/slurmlogs/%x-%j.err
+#SBATCH --output=slurm-%x-%j.out
+#SBATCH --error=slurm-%x-%j.err
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=460000
+#SBATCH --time=00:50:00
 #SBATCH --no-requeue
 
 set -euo pipefail
@@ -61,9 +54,9 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-4}"  # GH200 nodes: 4 GPUs/node (see #SBATCH --g
 #                                  KNOBS                                      #
 ###############################################################################
 
-RELAX_REPO_DIR="${RELAX_REPO_DIR:-/users/${USER}/haodong/framework/Relax}"
-RELAX_ENV_ROOT="${RELAX_ENV_ROOT:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/g2_relax_env_te214_sm90_cuda13_v2}"
-EDF_TOML="${EDF_TOML:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/edf/verl_sglang.toml}"
+: "${RELAX_REPO_DIR:?set RELAX_REPO_DIR to this checkout}"
+: "${RELAX_ENV_ROOT:?set RELAX_ENV_ROOT to the container runtime root}"
+: "${EDF_TOML:?set EDF_TOML to the Slurm container environment TOML}"
 # G2-A deliberately starts only the production TP2 ORM and TP2 VLM services.
 # It has no MobileGym browser/endpoint dependency and must occupy exactly one
 # four-GPU node. Normal training remains the default path.
@@ -74,6 +67,37 @@ G3_DUAL8_ONLY="${G3_DUAL8_ONLY:-0}"
 G4_ROLLOUT12_ONLY="${G4_ROLLOUT12_ONLY:-0}"
 G4_FULL12_ONLY="${G4_FULL12_ONLY:-0}"
 G5_FULL24_ONLY="${G5_FULL24_ONLY:-0}"
+IS_SYNC_DEDICATED="${IS_SYNC_DEDICATED:-0}"
+NUM_DATA_STORAGE_UNITS="${NUM_DATA_STORAGE_UNITS:-8}"
+G5_TOPOLOGY_PROFILE="${G5_TOPOLOGY_PROFILE:-balanced}"
+case "${NUM_DATA_STORAGE_UNITS}" in
+    ''|*[!0-9]*)
+        echo "ERROR: NUM_DATA_STORAGE_UNITS must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+if [ "${NUM_DATA_STORAGE_UNITS}" -lt 1 ]; then
+    echo "ERROR: NUM_DATA_STORAGE_UNITS must be a positive integer." >&2
+    exit 1
+fi
+if [ "${IS_SYNC_DEDICATED}" != "0" ] && [ "${IS_SYNC_DEDICATED}" != "1" ]; then
+    echo "ERROR: IS_SYNC_DEDICATED must be 0 or 1." >&2
+    exit 1
+fi
+if [ "${G5_FULL24_ONLY}" = "1" ] && [ "${IS_SYNC_DEDICATED}" != "1" ]; then
+    echo "ERROR: G5_FULL24_ONLY=1 supports only IS_SYNC_DEDICATED=1." >&2
+    exit 1
+fi
+if [ "${G5_FULL24_ONLY}" != "1" ] && [ "${IS_SYNC_DEDICATED}" = "1" ]; then
+    echo "ERROR: IS_SYNC_DEDICATED=1 is supported only by G5_FULL24_ONLY=1." >&2
+    exit 1
+fi
+if [ "${G5_FULL24_ONLY}" = "1" ] && [ "${G5_TOPOLOGY_PROFILE}" != "balanced" ] \
+    && [ "${G5_TOPOLOGY_PROFILE}" != "prm_mc48" ] \
+    && [ "${G5_TOPOLOGY_PROFILE}" != "prm_tp1dp4_mc32" ]; then
+    echo "ERROR: G5_TOPOLOGY_PROFILE must be balanced, prm_mc48, or prm_tp1dp4_mc32." >&2
+    exit 1
+fi
 if [ -z "${RUN_SCRIPT:-}" ]; then
     if [ "${G2_JUDGE_TOPOLOGY_ONLY}" = "1" ]; then
         RUN_SCRIPT="examples/mobilegym_agentic/run_g2_judge_tp2_smoke.sh"
@@ -105,7 +129,7 @@ fi
 HOST_LIB_DIR="${HOST_LIB_DIR:-/usr/lib64}"
 HOST_FONTCONFIG_DIR="${HOST_FONTCONFIG_DIR:-/etc/fonts}"
 HOST_FONTS_DIR="${HOST_FONTS_DIR:-/usr/share/fonts}"
-EXTRA_FONTS_DIR="${EXTRA_FONTS_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/fonts}"
+: "${EXTRA_FONTS_DIR:?set EXTRA_FONTS_DIR to a directory containing required browser fonts}"
 required_host_paths=("${HOST_LIB_DIR}")
 if [ "${G2_JUDGE_TOPOLOGY_ONLY}" != "1" ] && [ "${G3_ROLLOUT8_ONLY}" != "1" ] && [ "${G4_ROLLOUT12_ONLY}" != "1" ] && [ "${G3_ACTOR8_ONLY}" != "1" ]; then
     required_host_paths+=("${HOST_FONTCONFIG_DIR}" "${HOST_FONTS_DIR}" "${EXTRA_FONTS_DIR}")
@@ -131,7 +155,7 @@ fi
 export SGLANG_NUMA_LIBRARY="${SGLANG_NUMA_LIBRARY:-/host_usr_lib64/libnuma.so.1.0.0}"
 export BROWSER_HOST_LIB_DIR="${BROWSER_HOST_LIB_DIR:-/host_usr_lib64}"
 
-MOBILEGYM_REPO_DIR="${MOBILEGYM_REPO_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/mobilegym}"
+: "${MOBILEGYM_REPO_DIR:?set MOBILEGYM_REPO_DIR to the MobileGym checkout}"
 # MobileGym's bench_env.run needs Playwright + Chromium and must run INSIDE the
 # container, so it uses the same container-built venv as Relax rather than the
 # host-side python3.11 venv (which is not importable in the EDF image).
@@ -141,9 +165,8 @@ MOBILEGYM_PYTHON="${MOBILEGYM_PYTHON:-${RELAX_ENV_ROOT}/relax_venv/bin/python}"
 # running the nginx gateway -- a silent localhost default would fail with a
 # confusing "unreachable" error on every submission. Caller must pass the
 # login node's cluster-routable hostname/IP explicitly (confirmed reachable
-# from compute nodes: both the plain hostname, e.g. clariden-ln003, and its
-# hsn0-3 / nmn0 addresses all resolve and respond -- see
-# examples/mobilegym_agentic/README.md).
+# from compute nodes. Use the gateway address documented by the local
+# MobileGym deployment.
 if [ "${G2_JUDGE_TOPOLOGY_ONLY}" != "1" ] && [ "${G3_ROLLOUT8_ONLY}" != "1" ] && [ "${G4_ROLLOUT12_ONLY}" != "1" ] && [ "${G3_ACTOR8_ONLY}" != "1" ] && [ -z "${MOBILEGYM_ENV_URL:-}" ]; then
     echo "ERROR: MOBILEGYM_ENV_URL must be set, e.g.:" >&2
     echo '  --export=ALL,MOBILEGYM_ENV_URL=https://'"$(hostname)"':4180,...' >&2
@@ -155,12 +178,12 @@ if [ "${G2_JUDGE_TOPOLOGY_ONLY}" != "1" ] && [ "${G3_ROLLOUT8_ONLY}" != "1" ] &&
     export MOBILEGYM_PYTHON
 fi
 
-export MODEL_DIR="${MODEL_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/models}"
-export DATA_DIR="${DATA_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/data}"
-export SAVE_DIR="${SAVE_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/checkpoints}"
-export EXP_DIR="${EXP_DIR:-/iopsstor/scratch/cscs/${USER}/mobilegym_e2e/exp/${SLURM_JOB_ID}}"
+: "${MODEL_DIR:?set MODEL_DIR to the directory holding policy and judge checkpoints}"
+: "${DATA_DIR:?set DATA_DIR to the training dataset directory}"
+: "${SAVE_DIR:?set SAVE_DIR to the checkpoint output directory}"
+export EXP_DIR="${EXP_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/mobilegym-e2e-${SLURM_JOB_ID}}"
 # FlashInfer protects generated sampling modules with POSIX file locks.  Its
-# default cache under $HOME is shared storage on Clariden and fails under the
+# default cache under $HOME may be shared storage and fails under the
 # 24-GPU startup fan-out with ENOLCK.  Keep one cache per job on each node's
 # local filesystem so engines on that node can safely share compiled modules,
 # without carrying a warm JIT cache across experimental runs.
@@ -173,6 +196,11 @@ else
     export NUM_ROLLOUT="${NUM_ROLLOUT:-3}"
 fi
 export REASONING_TRIGGER="${REASONING_TRIGGER:-terminal_once}"
+export ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-1024}"
+if [ "${REASONING_TRIGGER}" != "terminal_once" ] && [ "${REASONING_TRIGGER}" != "per_turn" ]; then
+    echo "ERROR: REASONING_TRIGGER must be terminal_once or per_turn." >&2
+    exit 1
+fi
 export DEBUG_ROLLOUT_ONLY="${DEBUG_ROLLOUT_ONLY:-0}"
 export G3_ROLLOUT8_ONLY
 export G3_ACTOR8_ONLY
@@ -180,6 +208,9 @@ export G3_DUAL8_ONLY
 export G4_ROLLOUT12_ONLY
 export G4_FULL12_ONLY
 export G5_FULL24_ONLY
+export IS_SYNC_DEDICATED
+export G5_TOPOLOGY_PROFILE
+export RELAX_GPU_HOURS_BUDGET="${RELAX_GPU_HOURS_BUDGET:-260}"
 if [ "${G3_ROLLOUT8_ONLY}" = "1" ] || [ "${G3_ACTOR8_ONLY}" = "1" ] || [ "${G3_DUAL8_ONLY}" = "1" ]; then
     if [ "${NUM_NODES}" -ne 2 ] || [ "${GPUS_PER_NODE}" -ne 4 ]; then
         echo "ERROR: G3 rollout8/actor8 modes require exactly two nodes with four GPUs each." >&2
@@ -222,6 +253,7 @@ if [ "${G5_FULL24_ONLY}" = "1" ]; then
         echo "ERROR: G5_FULL24_ONLY=1 requires at least three rounds (one warmup plus at least two measured)." >&2
         exit 1
     fi
+    echo "IS_SYNC_DEDICATED=1: using six fixed role-labelled nodes (actor, rollout x3, ORM, PRM)."
     export RAY_CLUSTER_READY_TIMEOUT_S="${RAY_CLUSTER_READY_TIMEOUT_S:-180}"
     export RAY_GCS_WAIT_ATTEMPTS="${RAY_GCS_WAIT_ATTEMPTS:-36}"
     export RAY_JOIN_ATTEMPTS="${RAY_JOIN_ATTEMPTS:-12}"
@@ -233,7 +265,7 @@ fi
 # is a perf advisory, not a correctness issue -- safe to bypass for rollout
 # smoke tests; revisit before perf-sensitive runs on this image.
 export SGLANG_DISABLE_CUDNN_CHECK="${SGLANG_DISABLE_CUDNN_CHECK:-1}"
-echo "NUM_ROLLOUT=${NUM_ROLLOUT} REASONING_TRIGGER=${REASONING_TRIGGER} DEBUG_ROLLOUT_ONLY=${DEBUG_ROLLOUT_ONLY} G3_ROLLOUT8_ONLY=${G3_ROLLOUT8_ONLY} G3_ACTOR8_ONLY=${G3_ACTOR8_ONLY} G3_DUAL8_ONLY=${G3_DUAL8_ONLY} G4_FULL12_ONLY=${G4_FULL12_ONLY} G5_FULL24_ONLY=${G5_FULL24_ONLY} G2_JUDGE_TOPOLOGY_ONLY=${G2_JUDGE_TOPOLOGY_ONLY}"
+echo "NUM_ROLLOUT=${NUM_ROLLOUT} REASONING_TRIGGER=${REASONING_TRIGGER} IS_SYNC_DEDICATED=${IS_SYNC_DEDICATED} G5_TOPOLOGY_PROFILE=${G5_TOPOLOGY_PROFILE} NUM_DATA_STORAGE_UNITS=${NUM_DATA_STORAGE_UNITS} GPU_HOURS_BUDGET=${RELAX_GPU_HOURS_BUDGET} DEBUG_ROLLOUT_ONLY=${DEBUG_ROLLOUT_ONLY} G3_ROLLOUT8_ONLY=${G3_ROLLOUT8_ONLY} G3_ACTOR8_ONLY=${G3_ACTOR8_ONLY} G3_DUAL8_ONLY=${G3_DUAL8_ONLY} G4_FULL12_ONLY=${G4_FULL12_ONLY} G5_FULL24_ONLY=${G5_FULL24_ONLY} G2_JUDGE_TOPOLOGY_ONLY=${G2_JUDGE_TOPOLOGY_ONLY}"
 
 mkdir -p "${DATA_DIR}" "${SAVE_DIR}" "${EXP_DIR}" "${EXP_DIR}/flashinfer_workspace"
 export RELAX_SPMD_COMPLETION_FILE="${RELAX_SPMD_COMPLETION_FILE:-${EXP_DIR}/spmd_completion}"
@@ -255,6 +287,48 @@ if [ "${G2_JUDGE_TOPOLOGY_ONLY}" != "1" ] && [ "${G3_ROLLOUT8_ONLY}" != "1" ] &&
     echo "Start it first: see examples/mobilegym_agentic/README.md" >&2
     exit 1
 fi
+
+###############################################################################
+#                     CONSERVATIVE GPU-HOUR ADMISSION                         #
+###############################################################################
+
+# This runs after cheap topology/input/reachability validation and before Ray
+# or model startup.  Reservation is derived from the actual Slurm TimeLimit;
+# callers cannot understate it.  A completed/failed debug allocation can be
+# explicitly settled from Slurm's measured GPU seconds with
+# ``gpu_hour_budget.py --settle-job-id``; until then its full reservation is
+# retained, so an abandoned shell cannot silently free budget.
+SLURM_JOB_RECORD="$(scontrol show job --oneliner "${SLURM_JOB_ID}")"
+SLURM_TIME_LIMIT="$({
+    for field in ${SLURM_JOB_RECORD}; do
+        case "${field}" in
+            TimeLimit=*) printf '%s\n' "${field#TimeLimit=}"; break ;;
+        esac
+    done
+})"
+if [ -z "${SLURM_TIME_LIMIT}" ]; then
+    echo "ERROR: could not resolve Slurm TimeLimit for job ${SLURM_JOB_ID}." >&2
+    exit 1
+fi
+GPU_HOURS_LEDGER="${RELAX_GPU_HOURS_LEDGER:-${DATA_DIR}/sync_dedicated_gpu_hours.tsv}"
+GPU_HOURS_ARGS=(
+    --ledger "${GPU_HOURS_LEDGER}"
+    --job-id "${SLURM_JOB_ID}"
+    --budget "${RELAX_GPU_HOURS_BUDGET}"
+    --allocated-gpus "$((NUM_NODES * GPUS_PER_NODE))"
+    --time-limit "${SLURM_TIME_LIMIT}"
+    --trigger "${REASONING_TRIGGER}"
+)
+if [ "${IS_SYNC_DEDICATED}" = "1" ]; then
+    GPU_HOURS_ARGS+=(--max-job-gpu-hours 30)
+fi
+RELAX_GPU_HOURS_RESERVATION="$(
+    "${HOST_PYTHON:-python3.11}" \
+        "${RELAX_REPO_DIR}/examples/mobilegym_agentic/scripts/gpu_hour_budget.py" "${GPU_HOURS_ARGS[@]}"
+)"
+export RELAX_GPU_HOURS_LEDGER="${GPU_HOURS_LEDGER}"
+export RELAX_GPU_HOURS_RESERVATION
+echo "GPU_HOURS_RESERVATION=${RELAX_GPU_HOURS_RESERVATION} SLURM_TIME_LIMIT=${SLURM_TIME_LIMIT}"
 
 ###############################################################################
 #                      ONE-TIME RELAX VENV BOOTSTRAP (idempotent)             #
@@ -338,7 +412,7 @@ echo "MASTER_ADDR=${MASTER_ADDR} (head node: ${HEAD_NODE})"
 # which is easy to get subtly wrong with nested quoting.
 srun --nodes="${NUM_NODES}" --ntasks-per-node=1 --kill-on-bad-exit=1 --environment="${EDF_TOML}" \
     --container-mounts="${CONTAINER_MOUNTS}" \
-    --export=ALL,MASTER_ADDR,WORLD_SIZE="${NUM_NODES}",NUM_GPUS="${GPUS_PER_NODE}",NUM_GPUS_TOTAL="${GPUS_PER_NODE}",MEGATRON,MEGATRON_DIR,RELAX,VENV_BIN,CUDNN_LIB_DIR,FLASHINFER_WORKSPACE_BASE,RUN_SCRIPT_PATH,SGLANG_NUMA_LIBRARY,BROWSER_HOST_LIB_DIR,SGLANG_DISABLE_CUDNN_CHECK,TRANSFER_QUEUE_DIR,RAY_CLUSTER_READY_TIMEOUT_S,RAY_GCS_WAIT_ATTEMPTS,RAY_JOIN_ATTEMPTS,RELAX_SPMD_COMPLETION_FILE \
+    --export=ALL,MASTER_ADDR,WORLD_SIZE="${NUM_NODES}",NUM_GPUS="${GPUS_PER_NODE}",NUM_GPUS_TOTAL="${GPUS_PER_NODE}",MEGATRON,MEGATRON_DIR,RELAX,VENV_BIN,CUDNN_LIB_DIR,FLASHINFER_WORKSPACE_BASE,RUN_SCRIPT_PATH,SGLANG_NUMA_LIBRARY,BROWSER_HOST_LIB_DIR,SGLANG_DISABLE_CUDNN_CHECK,TRANSFER_QUEUE_DIR,RAY_CLUSTER_READY_TIMEOUT_S,RAY_GCS_WAIT_ATTEMPTS,RAY_JOIN_ATTEMPTS,RELAX_SPMD_COMPLETION_FILE,IS_SYNC_DEDICATED,G5_TOPOLOGY_PROFILE,NUM_DATA_STORAGE_UNITS,RELAX_GPU_HOURS_BUDGET,RELAX_GPU_HOURS_RESERVATION,ROLLOUT_MAX_RESPONSE_LEN \
     bash -c '
         set -euo pipefail
         export HOST_IP="$(hostname -I | awk "{print \$1}")"

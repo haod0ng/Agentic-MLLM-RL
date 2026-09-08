@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,96 @@ def _find_results_row(runs_dir: Path, *, task_id: str) -> dict[str, Any] | None:
     if row.get("id") != task_id:
         return None
     return row
+
+
+def _proc_snapshot(pid: int) -> dict[str, Any] | None:
+    """Read a low-cost, best-effort snapshot from Linux ``/proc``."""
+    stat_path = Path(f"/proc/{pid}/stat")
+    try:
+        stat_text = stat_path.read_text(encoding="utf-8")
+        close_paren = stat_text.rfind(")")
+        fields = stat_text[close_paren + 2 :].split()
+        if len(fields) < 22:
+            return None
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+        statm = Path(f"/proc/{pid}/statm").read_text(encoding="utf-8").split()
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return {
+            "pid": pid,
+            "ppid": int(fields[1]),
+            "state": fields[0],
+            "utime_ticks": int(fields[11]),
+            "stime_ticks": int(fields[12]),
+            "starttime_ticks": int(fields[19]),
+            "rss_bytes": int(statm[1]) * page_size if len(statm) > 1 else None,
+            "cmdline": cmdline,
+        }
+    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError, IndexError):
+        return None
+
+
+def _process_tree(root_pid: int) -> list[dict[str, Any]]:
+    snapshots: dict[int, dict[str, Any]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        snapshot = _proc_snapshot(int(entry))
+        if snapshot is not None:
+            snapshots[snapshot["pid"]] = snapshot
+    tree: list[dict[str, Any]] = []
+    frontier = [root_pid]
+    while frontier:
+        parent = frontier.pop()
+        current = snapshots.get(parent)
+        if current is None:
+            continue
+        tree.append(current)
+        children = [pid for pid, item in snapshots.items() if item["ppid"] == parent]
+        frontier.extend(children)
+    return tree
+
+
+def _process_role(cmdline: str) -> str:
+    lowered = cmdline.lower()
+    if "bench_env.run" in lowered:
+        return "bench_env"
+    if "playwright" in lowered or "driver" in lowered:
+        return "playwright"
+    if "--type=renderer" in lowered:
+        return "chromium_renderer"
+    if "--type=gpu-process" in lowered:
+        return "chromium_gpu"
+    if "--type=" in lowered:
+        return "chromium_utility"
+    if "chromium" in lowered:
+        return "chromium_browser"
+    return "other"
+
+
+def _sample_process_tree(
+    root_pid: int, *, session_id: str, task_id: str, output_path: Path, interval_s: float, stop: threading.Event
+) -> None:
+    """Persist process-tree samples without synchronizing with model/GPU
+    code."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    clock_ticks = os.sysconf("SC_CLK_TCK")
+    with output_path.open("w", encoding="utf-8") as output:
+        while not stop.is_set():
+            sampled_at = time.time()
+            tree = _process_tree(root_pid)
+            record = {
+                "schema_version": "relax.env_cpu_trace.v1",
+                "sampled_at": sampled_at,
+                "monotonic_s": time.monotonic(),
+                "session_id": session_id,
+                "task_id": task_id,
+                "root_pid": root_pid,
+                "clock_ticks_per_second": clock_ticks,
+                "processes": [{**item, "role": _process_role(item["cmdline"])} for item in tree],
+            }
+            output.write(json.dumps(record, separators=(",", ":")) + "\n")
+            output.flush()
+            stop.wait(max(0.1, interval_s))
 
 
 def _mobilegym_outcome_evidence(row: dict[str, Any], *, task_id: str) -> dict[str, Any]:
@@ -134,6 +225,9 @@ def run_mobilegym_episode(task_id: str, *, session_id: str, sample_seed: int) ->
     ]
 
     log_path = runs_dir / "bench_env_run.log"
+    trace_root = Path(os.environ.get("RELAX_ENV_CPU_TRACE_DIR", str(runs_root / "env_cpu")))
+    trace_path = trace_root / f"{session_id}.jsonl"
+    sample_interval_s = float(os.environ.get("RELAX_ENV_CPU_SAMPLE_INTERVAL_S", "1.0"))
     started_at = time.time()
     error: str | None = None
     return_code: int | None = None
@@ -153,24 +247,47 @@ def run_mobilegym_episode(task_id: str, *, session_id: str, sample_seed: int) ->
     # external SIGKILL when a page dies mid-episode.
     if os.environ.get("MOBILEGYM_PW_DEBUG"):
         subprocess_env["DEBUG"] = "pw:browser*"
+    sampler_stop = threading.Event()
+    sampler: threading.Thread | None = None
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
                 cwd=mobilegym_repo,
                 env=subprocess_env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
-                timeout=timeout_s,
-                check=False,
             )
-            return_code = completed.returncode
+            sampler = threading.Thread(
+                target=_sample_process_tree,
+                kwargs={
+                    "root_pid": process.pid,
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "output_path": trace_path,
+                    "interval_s": sample_interval_s,
+                    "stop": sampler_stop,
+                },
+                name=f"env-cpu-sampler-{session_id}",
+                daemon=True,
+            )
+            sampler.start()
+            try:
+                return_code = process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                error = f"bench_env.run exceeded MOBILEGYM_TIMEOUT_S={timeout_s}s"
             if return_code != 0:
                 error = f"bench_env.run exited with return code {return_code}"
     except subprocess.TimeoutExpired:
         error = f"bench_env.run exceeded MOBILEGYM_TIMEOUT_S={timeout_s}s"
     except Exception as exc:  # noqa: BLE001 -- surfaced via metadata, never raised to the caller
         error = f"{type(exc).__name__}: {exc}"
+    finally:
+        sampler_stop.set()
+        if sampler is not None:
+            sampler.join(timeout=max(2.0, sample_interval_s * 2.0))
 
     row = _find_results_row(runs_dir, task_id=task_id)
     elapsed_s = time.time() - started_at
@@ -184,6 +301,7 @@ def run_mobilegym_episode(task_id: str, *, session_id: str, sample_seed: int) ->
                 "error": error or "bench_env.run produced no results.jsonl row",
                 "subprocess_return_code": return_code,
                 "log_path": str(log_path),
+                "env_cpu_trace_path": str(trace_path),
             },
             "reward": None,
         }
@@ -212,6 +330,7 @@ def run_mobilegym_episode(task_id: str, *, session_id: str, sample_seed: int) ->
             "episode_error": execution.get("error"),
             "elapsed_s": elapsed_s,
             "subprocess_return_code": return_code,
+            "env_cpu_trace_path": str(trace_path),
             "mobilegym_outcome_evidence": _mobilegym_outcome_evidence(row, task_id=task_id),
             # `progress` (fraction of check_goals passed, 0.0-1.0) is a dense
             # signal from MobileGym's own deterministic state-diff judge. It is
@@ -224,6 +343,11 @@ def run_mobilegym_episode(task_id: str, *, session_id: str, sample_seed: int) ->
             # the reward source, while this field stays available to compare
             # their scores against the environment's ground truth.
             "env_progress": float(row.get("progress", 0.0)),
+            "stopwatch_total_s": execution.get("stopwatch_total_s"),
+            "stopwatch_flat": execution.get("stopwatch_flat"),
+            "stopwatch_tree": execution.get("stopwatch_tree"),
+            "mobilegym_start_time": row.get("start_time"),
+            "mobilegym_end_time": row.get("end_time"),
         },
         "reward": None,
     }

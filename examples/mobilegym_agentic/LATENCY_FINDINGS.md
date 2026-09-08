@@ -3,7 +3,7 @@
 Status: **preliminary**. All numbers below come from single, un-replicated smoke runs
 (8–9 publication rounds each). Directionally strong, not yet quotable.
 
-Analysed runs (`/iopsstor/scratch/cscs/$USER/mobilegym_e2e/exp/<job>`):
+Analysed runs (`<experiment-root>/<job>`):
 
 | workload | naming here | runs |
 |---|---|---|
@@ -216,9 +216,8 @@ for the same 8 images. Any capacity planning based on `input_tokens` is wrong.
    (base64 decode + SHA-256) is only **0.008 s**. Unresolved — this is E0's job.
 2. **VLM judge SGLang logs are absent from the driver log** (accuracy judge has 1,420
    `Prefill batch` lines; the VLM judge has none), so real prompt length and prefill/decode
-   split are unmeasured. **Root cause found:** `judge_multiturn_vlm` (`10.100.120.66`) is
-   placed on the same node as the Ray head — `RAY_ADDRESS`/GCS in the driver log is also
-   `10.100.120.66:6379` — while `judge_accuracy` runs on a separate node (`10.100.120.79`).
+   split are unmeasured. **Root cause found:** `judge_multiturn_vlm` is placed on the
+   same node as the Ray head/GCS, while `judge_accuracy` runs on a separate node.
    The driver log itself states *"Ray deduplicates logs by default... set
    `RAY_DEDUP_LOGS=0` to disable"*; both judges emit structurally-identical
    `Prefill batch, #new-seq: ..., #new-token: ...` lines, so this is the leading

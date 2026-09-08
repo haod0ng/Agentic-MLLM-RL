@@ -42,6 +42,10 @@ logger = get_logger(__name__)
 _ROLES = ("judge_accuracy", "judge_multiturn_vlm")
 _SWEEP_CONCURRENCIES = (1, 2, 4, 8)
 _FAULT_DRAIN_TIMEOUT_S = 90.0
+_SMOKE_PNG_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _prepend_unique_library_path(path: str) -> None:
@@ -86,9 +90,12 @@ def _require_contiguous_disjoint_pairs(services: dict[str, Service]) -> dict[str
     return mapping
 
 
-def _request_payload() -> dict[str, Any]:
+def _request_payload(*, include_image: bool = False) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": "Return a JSON object with a single key named ok."}]
+    if include_image:
+        content.append({"type": "image_url", "image_url": {"url": _SMOKE_PNG_DATA_URI}})
     return {
-        "messages": [{"role": "user", "content": "Return a JSON object with a single key named ok."}],
+        "messages": [{"role": "user", "content": content}],
         "sampling_params": {"temperature": 0.0, "max_new_tokens": 8},
         "max_input_tokens": 256,
     }
@@ -105,7 +112,7 @@ def _run_sweep(service: Service) -> list[dict[str, Any]]:
             # so use requests directly for this production request sweep.
             response = requests.post(
                 f"{get_serve_url(route_prefix=f'/{service.role}')}/generate",
-                json=_request_payload(),
+                json=_request_payload(include_image=service.role == "judge_multiturn_vlm"),
                 timeout=300,
             )
             response.raise_for_status()
@@ -225,12 +232,17 @@ async def _inject_client_timeout_and_retry(service: Service) -> dict[str, Any]:
     raise RuntimeError(f"{service.role} timeout injection unexpectedly completed without a timeout")
 
 
-def _long_request_payload() -> dict[str, Any]:
+def _long_request_payload(*, include_image: bool = False) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": "Summarize this text only after reading all words: " + ("critical-path " * 8000)}
+    ]
+    if include_image:
+        content.append({"type": "image_url", "image_url": {"url": _SMOKE_PNG_DATA_URI}})
     return {
         "messages": [
             {
                 "role": "user",
-                "content": "Summarize this text only after reading all words: " + ("critical-path " * 8000),
+                "content": content,
             }
         ],
         "sampling_params": {"temperature": 0.0, "max_new_tokens": 512},
@@ -287,17 +299,27 @@ def _run_fault_and_drain_gate(service: Service) -> dict[str, Any]:
     served_before_timeout = int(_service_metrics(service)["cumulative_served_requests"])
     timeout_result = asyncio.run(_inject_client_timeout_and_retry(service))
     after_timeout = _wait_for_drain(service, engine_base_urls)
-    reissue = requests.post(f"{service_url}/generate", json=_request_payload(), timeout=300)
+    reissue = requests.post(
+        f"{service_url}/generate",
+        json=_request_payload(include_image=service.role == "judge_multiturn_vlm"),
+        timeout=300,
+    )
     reissue.raise_for_status()
     after_reissue = _wait_for_drain(service, engine_base_urls)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        request_future = executor.submit(
-            requests.post,
-            f"{service_url}/generate",
-            json=_long_request_payload(),
-            timeout=_FAULT_DRAIN_TIMEOUT_S,
-        )
+    # A single request can finish between two metric polls on a fast GPU.
+    # Keep a small admitted pool so this gate observes real in-flight work
+    # before aborting it, instead of reporting a false placement failure.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        request_futures = [
+            executor.submit(
+                requests.post,
+                f"{service_url}/generate",
+                json=_long_request_payload(include_image=service.role == "judge_multiturn_vlm"),
+                timeout=_FAULT_DRAIN_TIMEOUT_S,
+            )
+            for _ in range(8)
+        ]
         admitted = _wait_for_inflight_request(service, engine_base_urls)
         abort_statuses = []
         for engine_base_url in engine_base_urls:
@@ -305,23 +327,33 @@ def _run_fault_and_drain_gate(service: Service) -> dict[str, Any]:
             abort_statuses.append(abort_response.status_code)
         if not all(status == 200 for status in abort_statuses):
             raise RuntimeError(f"{service.role} SGLang abort_request failed: {abort_statuses}")
-        try:
-            cancelled_response = request_future.result(timeout=_FAULT_DRAIN_TIMEOUT_S)
+        cancelled_outcomes: list[dict[str, Any]] = []
+        for request_future in request_futures:
             try:
-                cancelled_payload = cancelled_response.json()
-            except ValueError:
-                cancelled_payload = None
-            timings = cancelled_payload.get("timings") if isinstance(cancelled_payload, dict) else None
-            cancelled_outcome: dict[str, Any] = {
-                "kind": "http_response",
-                "status_code": cancelled_response.status_code,
-                "engine_attempt_count": timings.get("engine_attempt_count") if isinstance(timings, dict) else None,
-            }
-        except requests.RequestException as exc:
-            cancelled_outcome = {"kind": "request_exception", "type": type(exc).__name__}
+                cancelled_response = request_future.result(timeout=_FAULT_DRAIN_TIMEOUT_S)
+                try:
+                    cancelled_payload = cancelled_response.json()
+                except ValueError:
+                    cancelled_payload = None
+                timings = cancelled_payload.get("timings") if isinstance(cancelled_payload, dict) else None
+                cancelled_outcomes.append(
+                    {
+                        "kind": "http_response",
+                        "status_code": cancelled_response.status_code,
+                        "engine_attempt_count": timings.get("engine_attempt_count")
+                        if isinstance(timings, dict)
+                        else None,
+                    }
+                )
+            except requests.RequestException as exc:
+                cancelled_outcomes.append({"kind": "request_exception", "type": type(exc).__name__})
 
     after_cancel = _wait_for_drain(service, engine_base_urls)
-    post_abort_probe = requests.post(f"{service_url}/generate", json=_request_payload(), timeout=300)
+    post_abort_probe = requests.post(
+        f"{service_url}/generate",
+        json=_request_payload(include_image=service.role == "judge_multiturn_vlm"),
+        timeout=300,
+    )
     post_abort_probe.raise_for_status()
     after_probe = _wait_for_drain(service, engine_base_urls)
     recovery = service.wait_ready(timeout=300)
@@ -344,7 +376,7 @@ def _run_fault_and_drain_gate(service: Service) -> dict[str, Any]:
         "abort": {
             "inflight_observed": admitted,
             "abort_http_statuses": abort_statuses,
-            "long_request_outcome": cancelled_outcome,
+            "long_request_outcomes": cancelled_outcomes,
         },
         "drain": {
             "after_abort": after_cancel,

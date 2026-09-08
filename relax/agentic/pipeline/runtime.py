@@ -880,10 +880,18 @@ class ManagedSessionRunner:
                 continue
             payload = task.result()
             reward = payload.get("reward") if isinstance(payload, dict) else None
+            output_metadata = payload.get("_session_output_metadata") if isinstance(payload, dict) else None
+            if isinstance(output_metadata, dict):
+                output_metadata = {
+                    key: output_metadata.get(key)
+                    for key in ("error", "subprocess_return_code", "log_path", "env_cpu_trace_path")
+                    if key in output_metadata
+                }
             result[handle] = {
                 "kind": "result",
                 "session_id": self._session_id_by_handle.get(handle, ""),
                 "reward": reward,
+                "session_output_metadata": output_metadata,
             }
         return result
 
@@ -2291,10 +2299,12 @@ class RuntimeDomain:
         completed_handles = runner_pool.completed_session_handles(session_handles=list(handle_to_request))
         if not completed_handles:
             return []
+        diagnostics = runner_pool.completed_session_diagnostics(session_handles=completed_handles)
         return [
             {
                 "session_id": handle_to_request[managed_handle][0],
                 "request_id": handle_to_request[managed_handle][1],
+                "diagnostic": diagnostics.get(managed_handle),
             }
             for managed_handle in completed_handles
         ]

@@ -1,12 +1,15 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 import asyncio
+import base64
+import hashlib
 import threading
 from argparse import Namespace
 
 import pytest
 
 import relax.engine.rewards.dual_agentic_judge as dual_judge_module
+from relax.agentic.session.reward_context import MediaBlob
 from relax.engine.rewards.dual_agentic_judge import (
     DualJudgeExecutor,
     JudgeSampleRejected,
@@ -64,6 +67,25 @@ class _SequencedProfiledClient:
 def test_recorded_reward_hash_tracks_numeric_training_reward_only():
     assert recorded_reward_hash(0.5) == recorded_reward_hash({"score": 0.5, "diagnostic": "ignored"})
     assert recorded_reward_hash(0.5) != recorded_reward_hash(0.6)
+
+
+def test_media_payload_canonicalizes_repeated_media_occurrences():
+    context = _context()
+    raw = b"image"
+    media_id = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+    context.media_manifest = [
+        {"media_id": media_id, "mime_type": "image/png", "size_bytes": len(raw), "occurrence": occurrence}
+        for occurrence in (0, 1)
+    ]
+    context.media_blobs = {
+        media_id: MediaBlob(media_id=media_id, mime_type="image/png", data=raw),
+    }
+    projection = Namespace(media_ids=[media_id])
+
+    manifest, blobs = DualJudgeExecutor._media_payload(context, projection)
+
+    assert manifest == [context.media_manifest[0]]
+    assert blobs == {media_id: f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"}
 
 
 @pytest.mark.asyncio

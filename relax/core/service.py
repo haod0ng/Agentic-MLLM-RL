@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
+import inspect
 import json
 import os
 import threading
@@ -27,6 +28,37 @@ logger = get_logger(__name__)
 # service constructor. Bound readiness turns that condition into an actionable
 # startup error instead of leaving the controller blocked forever.
 PLACEMENT_GROUP_READY_TIMEOUT_S = 600.0
+
+
+_SYNC_DEDICATED_ROLES = frozenset({"actor", "rollout", "judge_accuracy", "judge_multiturn_vlm"})
+
+
+def _sync_dedicated_label_selector(
+    role: Optional[str], *, is_sync_dedicated: bool = False
+) -> Optional[dict[str, str]]:
+    """Return the node label selector used by the fixed sync-dedicated
+    layout."""
+    if not is_sync_dedicated:
+        return None
+    normalized_role = str(role or "").strip()
+    if normalized_role not in _SYNC_DEDICATED_ROLES:
+        raise ValueError(f"is_sync_dedicated requires a known dedicated role, got {normalized_role!r}.")
+    return {"relax_role": normalized_role}
+
+
+def _require_bundle_label_selector_support() -> None:
+    """Fail before allocating GPUs when the installed Ray lacks node-label
+    PGs."""
+    try:
+        parameters = inspect.signature(placement_group).parameters
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Cannot inspect Ray placement_group support for sync-dedicated placement.") from exc
+    if "bundle_label_selector" not in parameters:
+        ray_version = getattr(ray, "__version__", "unknown")
+        raise RuntimeError(
+            "--is-sync-dedicated requires Ray placement_group(bundle_label_selector=...), "
+            f"but installed Ray {ray_version} does not expose that capability."
+        )
 
 
 class Service:
@@ -78,6 +110,7 @@ class Service:
             placement_kwargs = {
                 "num_gpus": num_gpus,
                 "node_group_affinity": self.config.enable_affinity,
+                "is_sync_dedicated": getattr(self.config, "is_sync_dedicated", False),
             }
             if role in {"judge_accuracy", "judge_multiturn_vlm"}:
                 placement_kwargs["strategy"] = "STRICT_PACK"
@@ -363,6 +396,7 @@ class Service:
         placement_kwargs = {
             "num_gpus": self.num_gpus,
             "node_group_affinity": self.config.enable_affinity,
+            "is_sync_dedicated": getattr(self.config, "is_sync_dedicated", False),
         }
         if self.role in {"judge_accuracy", "judge_multiturn_vlm"}:
             placement_kwargs["strategy"] = "STRICT_PACK"
@@ -400,7 +434,13 @@ def _require_node_group_markers(node_group: str, retries: int = 3, retry_delay: 
     )
 
 
-def create_placement_group(num_gpus, node_group_affinity=True, strategy="PACK", role: str | None = None):
+def create_placement_group(
+    num_gpus,
+    node_group_affinity=True,
+    strategy="PACK",
+    role: str | None = None,
+    is_sync_dedicated: bool = False,
+):
     """Create a packed GPU placement group with optional node-group
     affinity."""
     accel_resource = device_utils.get_ray_accelerator_name()
@@ -410,7 +450,12 @@ def create_placement_group(num_gpus, node_group_affinity=True, strategy="PACK", 
         _require_node_group_markers(node_group)
         base_bundle = {**base_bundle, f"{node_group}_gpu": 1, f"{node_group}_cpu": 1}
     bundles = [dict(base_bundle) for _ in range(num_gpus)]
-    pg = placement_group(bundles, strategy=strategy)
+    label_selector = _sync_dedicated_label_selector(role, is_sync_dedicated=is_sync_dedicated)
+    placement_kwargs = {"strategy": strategy}
+    if label_selector is not None:
+        _require_bundle_label_selector_support()
+        placement_kwargs["bundle_label_selector"] = [label_selector for _ in bundles]
+    pg = placement_group(bundles, **placement_kwargs)
     num_bundles = len(bundles)
     # The ready ref used to be awaited without a timeout, which meant an
     # unschedulable dedicated judge PG could hang controller startup forever.
@@ -465,9 +510,11 @@ def create_placement_group(num_gpus, node_group_affinity=True, strategy="PACK", 
         ]
         path = Path(manifest_dir) / f"{role}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
+        manifest = {"schema_version": 1, "role": role, "strategy": strategy, "entries": entries}
+        if label_selector is not None:
+            manifest["node_label_selector"] = label_selector
         path.write_text(
-            json.dumps({"schema_version": 1, "role": role, "strategy": strategy, "entries": entries}, sort_keys=True)
-            + "\n",
+            json.dumps(manifest, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 

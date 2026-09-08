@@ -21,6 +21,7 @@ from relax.utils.opd.opd_utils import (
     validate_managed_opd_teacher_colocate_args,
     validate_opd_args,
 )
+from relax.utils.sync_dedicated import validate_sync_dedicated_args
 from relax.utils.training.eval_config import (
     EvalDatasetConfig,
     build_eval_dataset_configs,
@@ -164,6 +165,21 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=("Whether to use fully asynchronous training pipeline."),
+            )
+            parser.add_argument(
+                "--is-sync-dedicated",
+                action="store_true",
+                default=False,
+                help=(
+                    "Use the synchronous disaggregated topology with actor, rollout, and reward services "
+                    "on dedicated GPU nodes."
+                ),
+            )
+            parser.add_argument(
+                "--weight-version-validation-timeout-s",
+                type=float,
+                default=30.0,
+                help="Timeout for the post-publication rollout-engine version check in sync-dedicated mode.",
             )
             parser.add_argument(
                 "--hybrid",
@@ -3167,6 +3183,8 @@ def slime_validate_args(args):
 
     if args.use_critic:
         args.offload_train = True
+
+    validate_sync_dedicated_args(args)
 
     # expandable_segments cannot coexist with torch_memory_saver, the default mechanism
     # behind --offload-train. TMS's hook is armed from TMS_INIT_ENABLE inside the

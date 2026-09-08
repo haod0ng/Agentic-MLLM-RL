@@ -5,7 +5,6 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 
 def test_mobilegym_task_manifest_is_byte_stable_and_has_sample_seed(tmp_path: Path) -> None:
@@ -105,11 +104,20 @@ def test_mobilegym_wrapper_passes_sample_seed_as_a_subprocess_argument(tmp_path:
 
     captured: dict = {}
 
-    def _fake_run(cmd, **_kwargs):
-        captured["cmd"] = cmd
-        return SimpleNamespace(returncode=0)
+    class _FakeProcess:
+        pid = 12345
 
-    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    def _fake_popen(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return _FakeProcess()
+
+    monkeypatch.setattr(module.subprocess, "Popen", _fake_popen)
     module.run_mobilegym_episode("task.alpha", session_id="session-1", sample_seed=42)
 
     seed_index = captured["cmd"].index("--sample-seed") + 1
@@ -192,20 +200,32 @@ def test_g5_full24_mode_matches_production_topology_and_requires_post_warmup_con
     assert 'G5_FULL24_ONLY="${G5_FULL24_ONLY:-0}"' in submit_script
     assert "G5_FULL24_ONLY=1 requires exactly six nodes with four GPUs each" in submit_script
     assert "G5_FULL24_ONLY=1 requires at least three rounds (one warmup plus at least two measured)" in submit_script
+    assert "REASONING_TRIGGER must be terminal_once or per_turn" in submit_script
     assert (
-        "RESOURCE_JSON='{"
-        + '"actor":[1,4],"rollout":[1,12],"advantages":[1,0],'
-        + '"judge_accuracy":[1,4],"judge_multiturn_vlm":[1,4]}'
+        "RESOURCE_JSON='{" + '"actor":[1,4],"rollout":[1,12],' + '"judge_accuracy":[1,4],"judge_multiturn_vlm":[1,4]}'
         in run_script
     )
+    assert "G5_FULL24_ONLY=1 supports only IS_SYNC_DEDICATED=1" in run_script
+    assert "--is-sync-dedicated" in run_script
+    assert "--weight-version-validation-timeout-s" in run_script
+    assert "RELAX_SYNC_DEDICATED" not in run_script
+    assert 'SYNC_DEDICATED="${SYNC_DEDICATED' not in run_script
     assert "--actor-num-nodes 1" in run_script
     assert "--actor-num-gpus-per-node 4" in run_script
-    assert "--num-data-storage-units 8" in run_script
+    assert 'NUM_DATA_STORAGE_UNITS="${NUM_DATA_STORAGE_UNITS:-8}"' in run_script
+    assert '--num-data-storage-units "${NUM_DATA_STORAGE_UNITS}"' in run_script
     assert "--per-rank-fetch" not in run_script
     assert "--expected-groups-per-round 8" in run_script
     assert "--expected-samples-per-group 8" in run_script
     assert '--measure-updates "$((NUM_ROLLOUT - 1))"' in run_script
     assert "capture_gpu_inventory.py" in submit_script
+    assert "#SBATCH --time=00:50:00" in submit_script
+    assert "gpu_hour_budget.py" in submit_script
+    assert '"${HOST_PYTHON:-python3.11}"' in submit_script
+    assert "--max-job-gpu-hours 30" in submit_script
+    assert "validate_sync_dedicated_cluster.py" in Path("scripts/entrypoint/spmd-multinode.sh").read_text(
+        encoding="utf-8"
+    )
     assert (
         'FLASHINFER_WORKSPACE_BASE="${FLASHINFER_WORKSPACE_BASE:-/tmp/relax-flashinfer/${SLURM_JOB_ID}}"'
         in submit_script
@@ -215,6 +235,7 @@ def test_g5_full24_mode_matches_production_topology_and_requires_post_warmup_con
     assert "FLASHINFER_WORKSPACE_BASE,RELAX_DUAL_JUDGE_MARKER_DIR" in run_script
     assert "RELAX_PLACEMENT_MANIFEST_DIR" in run_script
     assert "check_g5_full24.py" in run_script
+    assert "node_label_selector" in checker
     assert "no post-warmup policy version reached committed rollout" in checker
     assert "training pixel_values were not compacted to bfloat16" in checker
     assert "put_get_socket._put_to_single_storage_unit] attempt 1/2 failed" in checker
@@ -288,4 +309,4 @@ def test_g2_bootstrap_pins_cuda13_cudnn_and_runs_real_fused_attention_gate() -> 
     assert "loss.backward()" in setup_script
     assert "NVTE_F16_arbitrary_seqlen" in setup_script
     assert 'Path("/proc/self/maps")' in setup_script
-    assert "g2_relax_env_te214_sm90_cuda13_v2" in submit_script
+    assert '"${RELAX_ENV_ROOT:?set RELAX_ENV_ROOT to the container runtime root}"' in submit_script

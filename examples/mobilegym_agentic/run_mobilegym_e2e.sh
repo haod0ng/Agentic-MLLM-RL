@@ -2,14 +2,15 @@
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 #
-# MobileGym x dual-judge Phase 0 end-to-end pipeline: 4 nodes x 4 GH200 (16
-# GPUs), fully-async, both dual-judge Judges on dedicated GPUs.
+# MobileGym x dual-judge sync-dedicated end-to-end pipeline. The G5 target
+# uses six 4-GPU GH200 nodes; legacy non-G5 smoke paths retain their original
+# model configuration.
 #
-# Resource layout (16 GPUs, fully-async):
-#   actor:               4 GPUs (Qwen3-VL-4B policy, TP=4)
-#   rollout:              8 GPUs (Qwen3-VL-4B, 8 SGLang engines x 1 GPU)
-#   judge_accuracy:       2 GPUs (Qwen3-8B, terminal-only in both variants)
-#   judge_multiturn_vlm:  2 GPUs (Qwen2.5-VL-7B, terminal_once OR per_turn --
+# Resource layout (24 GPUs in G5):
+#   actor:               4 GPUs (Qwen3-VL-8B policy, TP=4)
+#   rollout:              12 GPUs (Qwen3-VL-8B, 12 SGLang engines x 1 GPU)
+#   judge_accuracy:       4 GPUs (Qwen3-4B, terminal-only in both variants)
+#   judge_multiturn_vlm:  4 GPUs (Qwen2.5-VL-3B, terminal_once OR per_turn --
 #                          selected by JUDGE_SERVICES_CONFIG below)
 #   advantages:           0 GPUs (CPU)
 #
@@ -46,23 +47,78 @@ REASONING_TRIGGER="${REASONING_TRIGGER:=terminal_once}"  # terminal_once | per_t
 # hardcoded to 42 for both --rollout-seed/--seed; default unchanged so existing invocations
 # are unaffected.
 SEED="${SEED:=42}"
-EXP_NAME="qwen3-vl-4B-mobilegym-${REASONING_TRIGGER}-${TIMESTAMP}"
+ROLLOUT_SHUFFLE="${ROLLOUT_SHUFFLE:=1}"
 
 if [ -z "${MODEL_DIR:-}" ] || [ -z "${DATA_DIR:-}" ] || [ -z "${SAVE_DIR:-}" ] || [ -z "${EXP_DIR:-}" ]; then
     echo "ERROR: MODEL_DIR, DATA_DIR, SAVE_DIR, and EXP_DIR must be set."
     exit 1
 fi
-mkdir -p "${SAVE_DIR}" "${EXP_DIR}/timeline" "${EXP_DIR}/rollout_result" "${EXP_DIR}/gpu_samples" "${EXP_DIR}/latency_markers" "${EXP_DIR}/placement"
+required_models=("${POLICY_MODEL_NAME}" "Qwen3-4B")
+if [ "${G5_FULL24_ONLY}" = "1" ]; then
+    required_models+=("Qwen2.5-VL-3B-Instruct")
+else
+    required_models+=("Qwen2.5-VL-7B-Instruct")
+fi
+for required_model in "${required_models[@]}"; do
+    if [ ! -d "${MODEL_DIR}/${required_model}" ]; then
+        echo "ERROR: required model directory is missing: ${MODEL_DIR}/${required_model}" >&2
+        exit 1
+    fi
+done
+mkdir -p "${SAVE_DIR}" "${EXP_DIR}/timeline" "${EXP_DIR}/rollout_result" "${EXP_DIR}/gpu_samples" "${EXP_DIR}/latency_markers" "${EXP_DIR}/placement" "${EXP_DIR}/env_cpu" "${EXP_DIR}/transfer_trace"
 G4_FULL12_ONLY="${G4_FULL12_ONLY:-0}"
 G5_FULL24_ONLY="${G5_FULL24_ONLY:-0}"
+IS_SYNC_DEDICATED="${IS_SYNC_DEDICATED:-0}"
+NUM_DATA_STORAGE_UNITS="${NUM_DATA_STORAGE_UNITS:-8}"
+G5_TOPOLOGY_PROFILE="${G5_TOPOLOGY_PROFILE:-balanced}"
+case "${NUM_DATA_STORAGE_UNITS}" in
+    ''|*[!0-9]*)
+        echo "ERROR: NUM_DATA_STORAGE_UNITS must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+if [ "${NUM_DATA_STORAGE_UNITS}" -lt 1 ]; then
+    echo "ERROR: NUM_DATA_STORAGE_UNITS must be a positive integer." >&2
+    exit 1
+fi
+if [ "${IS_SYNC_DEDICATED}" != "0" ] && [ "${IS_SYNC_DEDICATED}" != "1" ]; then
+    echo "ERROR: IS_SYNC_DEDICATED must be 0 or 1." >&2
+    exit 1
+fi
+if [ "${G5_FULL24_ONLY}" = "1" ] && [ "${IS_SYNC_DEDICATED}" != "1" ]; then
+    echo "ERROR: G5_FULL24_ONLY=1 supports only IS_SYNC_DEDICATED=1." >&2
+    exit 1
+fi
+if [ "${G5_FULL24_ONLY}" != "1" ] && [ "${IS_SYNC_DEDICATED}" = "1" ]; then
+    echo "ERROR: IS_SYNC_DEDICATED=1 is supported only by the fixed G5_FULL24 topology." >&2
+    exit 1
+fi
+if [ "${G5_FULL24_ONLY}" = "1" ] && [ "${G5_TOPOLOGY_PROFILE}" != "balanced" ] \
+    && [ "${G5_TOPOLOGY_PROFILE}" != "prm_mc48" ] \
+    && [ "${G5_TOPOLOGY_PROFILE}" != "prm_tp1dp4_mc32" ]; then
+    echo "ERROR: G5_TOPOLOGY_PROFILE must be balanced, prm_mc48, or prm_tp1dp4_mc32." >&2
+    exit 1
+fi
+if [ "${G5_FULL24_ONLY}" = "1" ]; then
+    source "${MODEL_CONFIG_DIR}/qwen3-vl-8B.sh"
+    POLICY_MODEL_NAME="Qwen3-VL-8B-Instruct"
+    EXPERIMENT_MODEL_TAG="qwen3-vl-8B-prm3B"
+else
+    POLICY_MODEL_NAME="Qwen3-VL-4B-Instruct"
+    EXPERIMENT_MODEL_TAG="qwen3-vl-4B"
+fi
+EXP_NAME="${EXPERIMENT_MODEL_TAG}-mobilegym-${REASONING_TRIGGER}-${TIMESTAMP}"
 export RELAX_JUDGE_GPU_SAMPLE_DIR="${EXP_DIR}/gpu_samples"
 export RELAX_JUDGE_GPU_SAMPLE_INTERVAL_S="${RELAX_JUDGE_GPU_SAMPLE_INTERVAL_S:-0.2}"
 export RELAX_DUAL_JUDGE_MARKER_DIR="${EXP_DIR}/latency_markers"
 export RELAX_PLACEMENT_MANIFEST_DIR="${EXP_DIR}/placement"
+export RELAX_TQ_TRACE_DIR="${EXP_DIR}/transfer_trace"
+export RELAX_ENV_CPU_TRACE_DIR="${EXP_DIR}/env_cpu"
+export RELAX_ENV_CPU_SAMPLE_INTERVAL_S="${RELAX_ENV_CPU_SAMPLE_INTERVAL_S:-1.0}"
 if [ "${G4_FULL12_ONLY}" = "1" ] || [ "${G5_FULL24_ONLY}" = "1" ]; then
     export RELAX_REQUIRE_WEIGHT_PUBLICATION=1
 fi
-export RELAX_PROPAGATE_ENV_VARS="${RELAX_PROPAGATE_ENV_VARS:+${RELAX_PROPAGATE_ENV_VARS},}CUDNN_LIB_DIR,LD_LIBRARY_PATH,FLASHINFER_WORKSPACE_BASE,RELAX_DUAL_JUDGE_MARKER_DIR,RELAX_JUDGE_GPU_SAMPLE_DIR,RELAX_JUDGE_GPU_SAMPLE_INTERVAL_S,RELAX_PLACEMENT_MANIFEST_DIR,RELAX_PROPAGATE_ENV_VARS,RELAX_REQUIRE_WEIGHT_PUBLICATION"
+export RELAX_PROPAGATE_ENV_VARS="${RELAX_PROPAGATE_ENV_VARS:+${RELAX_PROPAGATE_ENV_VARS},}CUDNN_LIB_DIR,LD_LIBRARY_PATH,FLASHINFER_WORKSPACE_BASE,RELAX_DUAL_JUDGE_MARKER_DIR,RELAX_JUDGE_GPU_SAMPLE_DIR,RELAX_JUDGE_GPU_SAMPLE_INTERVAL_S,RELAX_PLACEMENT_MANIFEST_DIR,RELAX_TQ_TRACE_DIR,RELAX_ENV_CPU_TRACE_DIR,RELAX_ENV_CPU_SAMPLE_INTERVAL_S,RELAX_PROPAGATE_ENV_VARS,RELAX_REQUIRE_WEIGHT_PUBLICATION"
 
 # ``ray job submit`` starts the training driver in a fresh runtime environment;
 # ordinary shell exports from this launcher are not inherited.  The driver must
@@ -87,6 +143,9 @@ for name in (
     "RELAX_JUDGE_GPU_SAMPLE_DIR",
     "RELAX_JUDGE_GPU_SAMPLE_INTERVAL_S",
     "RELAX_PLACEMENT_MANIFEST_DIR",
+    "RELAX_TQ_TRACE_DIR",
+    "RELAX_ENV_CPU_TRACE_DIR",
+    "RELAX_ENV_CPU_SAMPLE_INTERVAL_S",
     "RELAX_PROPAGATE_ENV_VARS",
     "RELAX_REQUIRE_WEIGHT_PUBLICATION",
 ):
@@ -130,13 +189,19 @@ if [ "${DEBUG_ROLLOUT_ONLY}" = "1" ] && [ "${G3_DUAL8_ONLY}" != "1" ]; then
     # judge terminal_once while the caller believed it was measuring per_turn.
     JUDGE_SERVICES_CONFIG="${SCRIPT_DIR}/judge_services_e2e_debug_${REASONING_TRIGGER}.json"
 elif [ "${G5_FULL24_ONLY}" = "1" ]; then
-    # G5 uses a balanced 4/12/4/4 resource split (single-node 4-GPU actor,
-    # TP=4 judge engines with Qwen3-4B answer_accuracy) that differs from the
-    # 2-GPU-per-engine judges shared by G3/G4/default -- see judge_services_e2e_g5_*.json.
-    JUDGE_SERVICES_CONFIG="${SCRIPT_DIR}/judge_services_e2e_g5_${REASONING_TRIGGER}.json"
+    # G5 uses a balanced 4/12/4/4 resource split. The PRM reserves all four
+    # GPUs but runs one SGLang endpoint internally as TP2 x DP2.
+    if [ "${G5_TOPOLOGY_PROFILE}" = "prm_mc48" ]; then
+        JUDGE_SERVICES_CONFIG="${SCRIPT_DIR}/judge_services_e2e_g5_qwen3vl8_prm3b_${REASONING_TRIGGER}_tp1dp4_mc48.json"
+    elif [ "${G5_TOPOLOGY_PROFILE}" = "prm_tp1dp4_mc32" ]; then
+        JUDGE_SERVICES_CONFIG="${SCRIPT_DIR}/judge_services_e2e_g5_qwen3vl8_prm3b_${REASONING_TRIGGER}_tp1dp4_mc32.json"
+    else
+        JUDGE_SERVICES_CONFIG="${SCRIPT_DIR}/judge_services_e2e_g5_qwen3vl8_prm3b_${REASONING_TRIGGER}.json"
+    fi
 else
     JUDGE_SERVICES_CONFIG="${SCRIPT_DIR}/judge_services_e2e_${REASONING_TRIGGER}.json"
 fi
+
 # Escape hatch for latency A/B arms that need a config identical to the auto-selected one
 # except for a specific field (e.g. max_concurrency) -- see
 # examples/mobilegym_agentic/LATENCY_FINDINGS.md section 7. Still gated by the same
@@ -149,25 +214,56 @@ if [ -n "${JUDGE_SERVICES_CONFIG}" ] && [ ! -f "${JUDGE_SERVICES_CONFIG}" ]; the
     echo "ERROR: no judge config at ${JUDGE_SERVICES_CONFIG}"
     exit 1
 fi
+# Expand ${USER} and other deployment-local variables once, after applying the
+# override, before passing the JSON through argparse. This keeps profile files
+# portable while making effective model paths explicit in the run's arguments.
+JUDGE_SERVICES_JSON="$(JUDGE_SERVICES_CONFIG="${JUDGE_SERVICES_CONFIG}" python3 - <<'PY'
+import json
+import os
+import sys
+
+
+def expand(value):
+    if isinstance(value, dict):
+        return {key: expand(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [expand(item) for item in value]
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    return value
+
+
+with open(os.environ["JUDGE_SERVICES_CONFIG"], encoding="utf-8") as handle:
+    json.dump(expand(json.load(handle)), sys.stdout, separators=(",", ":"))
+PY
+)"
 
 ###############################################################################
 #                                  MODEL CONFIG                               #
 ###############################################################################
 
 CKPT_ARGS=(
-    --hf-checkpoint "${MODEL_DIR}/Qwen3-VL-4B-Instruct"
+    --hf-checkpoint "${MODEL_DIR}/${POLICY_MODEL_NAME}"
     --megatron-to-hf-mode bridge
-    --save "${SAVE_DIR}/Qwen3-VL-4B-MobileGym-Checkpoint"
+    --save "${SAVE_DIR}/${POLICY_MODEL_NAME}-MobileGym-Checkpoint"
     --save-interval 100
     --max-actor-ckpt-to-keep 1
 )
 if [ "${G4_FULL12_ONLY}" = "1" ] || [ "${G5_FULL24_ONLY}" = "1" ]; then
     CKPT_ARGS=(
-        --hf-checkpoint "${MODEL_DIR}/Qwen3-VL-4B-Instruct"
+        --hf-checkpoint "${MODEL_DIR}/${POLICY_MODEL_NAME}"
         --megatron-to-hf-mode bridge
         --save "${EXP_DIR}/checkpoint"
         --save-interval 1
         --max-actor-ckpt-to-keep 1
+    )
+fi
+if [ "${IS_SYNC_DEDICATED}" = "1" ]; then
+    # Checkpoint I/O would otherwise be charged to the weight-update stage;
+    # sync-dedicated timing runs intentionally isolate serving/update latency.
+    CKPT_ARGS=(
+        --hf-checkpoint "${MODEL_DIR}/${POLICY_MODEL_NAME}"
+        --megatron-to-hf-mode bridge
     )
 fi
 
@@ -214,6 +310,15 @@ else
     GLOBAL_BATCH_SIZE=64
 fi
 
+ROLLOUT_TEMPERATURE="${ROLLOUT_TEMPERATURE:-1}"
+# Qwen3-VL can emit a long reasoning/tool-call turn even with thinking
+# disabled.  The former hard-coded 512-token cap caused committed MobileGym
+# samples to be marked truncated and silently routed to terminal fallback,
+# contaminating the per-turn PRM measurement.  Keep this configurable so a
+# benchmark can trade clean turn coverage against decode latency; 1024 is the
+# conservative G5 candidate default and must be checked by the strict result
+# checker on the next full run.
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-1024}"
 ROLLOUT_ARGS=(
     --prompt-data "${TRAIN_FILE}"
     --input-key input
@@ -230,24 +335,29 @@ ROLLOUT_ARGS=(
         "MOBILEGYM_AGENT=${MOBILEGYM_AGENT:=generic_v2}" \
         "MOBILEGYM_MAX_STEPS=${MOBILEGYM_MAX_STEPS:=8}" \
         "MOBILEGYM_TIMEOUT_S=${MOBILEGYM_TIMEOUT_S:=1200}" \
-        "MOBILEGYM_HISTORY_IMAGES=${MOBILEGYM_HISTORY_IMAGES:=1}"
+        "MOBILEGYM_HISTORY_IMAGES=${MOBILEGYM_HISTORY_IMAGES:=1}" \
+        "BROWSER_LD_LIBRARY_PATH=${BROWSER_LD_LIBRARY_PATH:-}"
     --agent-timeout 1800
     --num-rollout ${NUM_ROLLOUT}
     --rollout-batch-size ${ROLLOUT_BATCH_SIZE}
     --n-samples-per-prompt ${N_SAMPLES_PER_PROMPT}
     --rollout-max-prompt-len 16384
-    --rollout-max-response-len 512
+    --rollout-max-response-len ${ROLLOUT_MAX_RESPONSE_LEN}
     --rollout-max-context-len 32768
-    --rollout-temperature 1
+    --rollout-temperature ${ROLLOUT_TEMPERATURE}
     --global-batch-size ${GLOBAL_BATCH_SIZE}
-    --rollout-shuffle
     --rollout-seed ${SEED}
     --seed ${SEED}
     --reward-key score
 )
+case "${ROLLOUT_SHUFFLE}" in
+    0) ;;
+    1) ROLLOUT_ARGS+=(--rollout-shuffle) ;;
+    *) echo "ERROR: ROLLOUT_SHUFFLE must be 0 or 1." >&2; exit 1 ;;
+esac
 ROLLOUT_ARGS+=(
     --rm-type dual-agentic-judge
-    --judge-services-config "$(tr -d '\n' < "${JUDGE_SERVICES_CONFIG}")"
+    --judge-services-config "${JUDGE_SERVICES_JSON}"
 )
 if [ "${DEBUG_ROLLOUT_ONLY}" = "1" ] || [ "${G3_DUAL8_ONLY}" = "1" ]; then
     mkdir -p "${EXP_DIR}/debug_rollout"
@@ -288,9 +398,26 @@ SGLANG_ARGS=(
     --rollout-engine-init-timeout 300
     --sglang-mem-fraction-static 0.6
 )
+ROLLOUT_ROUTER_MODE="${ROLLOUT_ROUTER_MODE:-round_robin}"
 if [ "${G3_DUAL8_ONLY}" = "1" ] || [ "${G4_FULL12_ONLY}" = "1" ] || [ "${G5_FULL24_ONLY}" = "1" ]; then
-    SGLANG_ARGS+=(--sglang-router-policy round_robin)
+    case "${ROLLOUT_ROUTER_MODE}" in
+        round_robin)
+            SGLANG_ARGS+=(--sglang-router-policy round_robin)
+            ;;
+        sticky)
+            SGLANG_ARGS+=(
+                --use-slime-router
+                --slime-router-sticky
+                --slime-router-sticky-idle-secs 1800
+            )
+            ;;
+        *)
+            echo "ERROR: ROLLOUT_ROUTER_MODE must be round_robin or sticky." >&2
+            exit 1
+            ;;
+    esac
 fi
+echo "ROLLOUT_ROUTER_MODE=${ROLLOUT_ROUTER_MODE}"
 
 ###############################################################################
 #                               LOGGING CONFIG                                #
@@ -369,7 +496,10 @@ if [ "${G5_FULL24_ONLY}" = "1" ]; then
     # 4-GPU TP judge engines so ORM (Qwen3-4B) and PRM (Qwen2.5-VL) get equal
     # footprint regardless of per-trajectory call count (terminal-once vs
     # per-turn).
-    RESOURCE_JSON='{"actor":[1,4],"rollout":[1,12],"advantages":[1,0],"judge_accuracy":[1,4],"judge_multiturn_vlm":[1,4]}'
+    RESOURCE_JSON='{"actor":[1,4],"rollout":[1,12],"judge_accuracy":[1,4],"judge_multiturn_vlm":[1,4]}'
+    G5_EXPECTED_ROLLOUT_GPUS=12
+    G5_EXPECTED_ORM_GPUS=4
+    G5_EXPECTED_PRM_GPUS=4
 elif [ "${G3_DUAL8_ONLY}" = "1" ]; then
     RESOURCE_JSON='{"rollout":[1,4],"judge_accuracy":[1,2],"judge_multiturn_vlm":[1,2]}'
 elif [ "${DEBUG_ROLLOUT_ONLY}" = "1" ]; then
@@ -389,30 +519,32 @@ else
     RESOURCE_JSON='{"actor":[1,4],"rollout":[1,4],"advantages":[1,0],"judge_accuracy":[1,2],"judge_multiturn_vlm":[1,2]}'
 fi
 
-RAY_RESOURCE_ARGS=(
-    --resource "${RESOURCE_JSON}"
-    # GH200 allocations have four GPUs per node. Rollout rendezvous groups are
-    # derived from this value; leaving the upstream default of eight assigns
-    # node-B engines a node-A dist-init address in a two-node allocation.
-    --num-gpus-per-node 4
-    --actor-num-nodes 1
-    --actor-num-gpus-per-node 4
-    --max-staleness 1
-    --num-data-storage-units 1
-    --fully-async
-)
 if [ "${G5_FULL24_ONLY}" = "1" ]; then
+    # G5 is intentionally sync-dedicated only. Hash the same partition across
+    # eight native TQ storage actors without changing batch/sampler semantics.
     RAY_RESOURCE_ARGS=(
         --resource "${RESOURCE_JSON}"
         --num-gpus-per-node 4
         --actor-num-nodes 1
         --actor-num-gpus-per-node 4
+        --max-staleness 0
+        --num-data-storage-units "${NUM_DATA_STORAGE_UNITS}"
+        --no-offload-train
+        --no-offload-rollout
+        --is-sync-dedicated
+        --weight-version-validation-timeout-s "${WEIGHT_VERSION_VALIDATION_TIMEOUT_S:-30}"
+    )
+else
+    RAY_RESOURCE_ARGS=(
+        --resource "${RESOURCE_JSON}"
+        # GH200 allocations have four GPUs per node. Rollout rendezvous groups
+        # are derived from this value; leaving the upstream default of eight
+        # can assign a node-B engine a node-A rendezvous address.
+        --num-gpus-per-node 4
+        --actor-num-nodes 1
+        --actor-num-gpus-per-node 4
         --max-staleness 1
-        # One SimpleStorageUnit takes about 17-18s for four MobileGym VL rows
-        # and times out (200s per attempt) on the 64-row G5 transfer.  Hash the
-        # same partition across eight native TQ storage actors so the payload is
-        # transferred in parallel without changing batch or sampler semantics.
-        --num-data-storage-units 8
+        --num-data-storage-units 1
         --fully-async
     )
 fi
@@ -436,7 +568,14 @@ else
     DRIVER_LOG="logs/${EXP_NAME}.log"
 fi
 
-ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
+# Ray's log-stream endpoint can close while the job is still RUNNING (the
+# previous six-node run returned here immediately after rollout 0). An
+# explicit submission id lets us distinguish that transport-level EOF from a
+# terminal job state and keep the SPMD allocation alive until training and
+# weight publication have actually finished.
+RAY_JOB_SUBMISSION_ID="${RAY_JOB_SUBMISSION_ID:-relax-${SLURM_JOB_ID:-manual}-${REASONING_TRIGGER}}"
+set +e
+ray job submit --submission-id "${RAY_JOB_SUBMISSION_ID}" ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
     --runtime-env-json="${RUNTIME_ENV_JSON}" \
     -- python3 -m relax.entrypoints.train \
     "${RAY_RESOURCE_ARGS[@]}" \
@@ -449,6 +588,50 @@ ray job submit ${RAY_NO_WAIT:+--no-wait} --address="http://127.0.0.1:8265" \
     "${LOG_ARGS[@]}" \
     "${MEGATRON_ARGS[@]}" \
     2>&1 | tee "${DRIVER_LOG}"
+submit_rc=${PIPESTATUS[0]}
+set -e
+if [ "${submit_rc}" -ne 0 ]; then
+    echo "ERROR: Ray job ${RAY_JOB_SUBMISSION_ID} submission/log stream failed with exit code ${submit_rc}." >&2
+    exit "${submit_rc}"
+fi
+
+# The CLI normally waits for the job, but its log stream is not a reliable
+# lifecycle signal under the large multimodal output volume. Poll the Job
+# Submission API explicitly whenever the stream returned before a terminal
+# state. This loop is bounded by the Slurm allocation and fails closed on a
+# real FAILED/STOPPED state, so analyzers never consume a partial trajectory.
+job_wait_timeout_s="${RAY_JOB_COMPLETION_TIMEOUT_S:-3600}"
+job_wait_deadline=$((SECONDS + job_wait_timeout_s))
+while true; do
+    if ! job_status_output="$(ray job status "${RAY_JOB_SUBMISSION_ID}" 2>&1)"; then
+        printf '%s\n' "${job_status_output}" | tee -a "${DRIVER_LOG}"
+        if [ "${SECONDS}" -ge "${job_wait_deadline}" ]; then
+            echo "ERROR: unable to query Ray job ${RAY_JOB_SUBMISSION_ID} before the ${job_wait_timeout_s}s deadline." >&2
+            exit 1
+        fi
+        sleep 5
+        continue
+    fi
+    printf '%s\n' "${job_status_output}" | tee -a "${DRIVER_LOG}"
+    # Ray CLI emits either ``Status for job ...: SUCCEEDED`` or the terminal
+    # summary ``Job '...' succeeded`` depending on the installed Ray version.
+    # Treat both forms as lifecycle signals; otherwise a completed job leaves
+    # the SPMD wrapper polling until Slurm kills an otherwise successful run.
+    if printf '%s\n' "${job_status_output}" | grep -Eiq \
+        "Status[^:]*: (SUCCEEDED|STOPPED|FAILED)|Job .* (succeeded|stopped|failed)"; then
+        if printf '%s\n' "${job_status_output}" | grep -Eiq \
+            "Status[^:]*: (STOPPED|FAILED)|Job .* (stopped|failed)"; then
+            echo "ERROR: Ray job ${RAY_JOB_SUBMISSION_ID} reached a failure terminal state." >&2
+            exit 1
+        fi
+        break
+    fi
+    if [ "${SECONDS}" -ge "${job_wait_deadline}" ]; then
+        echo "ERROR: Ray job ${RAY_JOB_SUBMISSION_ID} did not reach a terminal state within ${job_wait_timeout_s}s." >&2
+        exit 1
+    fi
+    sleep 5
+done
 
 if [ "${G3_DUAL8_ONLY}" = "1" ]; then
     python3 "${SCRIPT_DIR}/../agentic_dual_judge/analyze_latency.py" \
@@ -512,5 +695,9 @@ if [ "${G5_FULL24_ONLY}" = "1" ]; then
         --exp-dir "${EXP_DIR}" \
         --trigger "${REASONING_TRIGGER}" \
         --expected-steps "${NUM_ROLLOUT}" \
+        --expected-storage-units "${NUM_DATA_STORAGE_UNITS}" \
+        --expected-rollout-gpus "${G5_EXPECTED_ROLLOUT_GPUS}" \
+        --expected-orm-gpus "${G5_EXPECTED_ORM_GPUS}" \
+        --expected-prm-gpus "${G5_EXPECTED_PRM_GPUS}" \
         --max-clock-offset-ms "${RELAX_G5_MAX_CLOCK_OFFSET_MS:-10}"
 fi

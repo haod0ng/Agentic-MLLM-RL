@@ -37,6 +37,7 @@ STAGE_ORDER = (
     "training",
     "weight_gate_wait",
     "weight_update",
+    "weight_validation",
 )
 
 REQUIRED_CRITICAL_EVENT_NAMES = (
@@ -96,6 +97,8 @@ def _stage_for_event(name: str) -> str | None:
         return "training"
     if name == "critical_path.weight_gate_wait":
         return "weight_gate_wait"
+    if name == "critical_path.weight_version_validation":
+        return "weight_validation"
     if name.startswith("critical_path.weight_"):
         return "weight_update"
     return None
@@ -1310,6 +1313,26 @@ def analyze_direct_events(
             training_sample_count=trajectory_report["raw_count"],
         )
         gpu_issues.extend(computed_gpu_issues)
+    stage_occupancy_s = (
+        {
+            stage: _union_duration(
+                (
+                    max(window[0], event["start_s"]),
+                    min(window[1], event["end_s"]),
+                )
+                for event in measured_events
+                if event["stage"] == stage
+            )
+            for stage in STAGE_ORDER
+        }
+        if window is not None
+        else {stage: 0.0 for stage in STAGE_ORDER}
+    )
+    total_window_s = window[1] - window[0] if window is not None else 0.0
+    inclusive_occupancy_percent = {
+        stage: (100.0 * duration / total_window_s if total_window_s > 0 else 0.0)
+        for stage, duration in stage_occupancy_s.items()
+    }
     return {
         "analysis_mode": "standalone_direct",
         "observed_benchmark_modes": sorted(observed_modes),
@@ -1334,6 +1357,9 @@ def analyze_direct_events(
         "publication": _direct_publication_report(events, measured_steps),
         "workload": _direct_workload_report(events, measured_steps),
         "reliability": _direct_reliability_report(events, measured_steps),
+        "total_window_s": total_window_s,
+        "stage_occupancy_s": stage_occupancy_s,
+        "inclusive_occupancy_percent": inclusive_occupancy_percent,
         "judge_gpu_efficiency": gpu_report,
         "judge_gpu_efficiency_issues": gpu_issues,
     }
@@ -2625,6 +2651,7 @@ def analyze_events(
         "expected_trainer_components": expected_trainer_component_summary,
         "optimizer_steps_per_publication_round": optimizer_steps_per_publication_round,
         "step_makespan": _statistics(step_makespans),
+        "stage_occupancy_s": stage_occupancy_s,
         "inclusive_occupancy_percent": percentages(stage_occupancy_s),
         "active_set_percent": percentages(dict(active_set_s)),
         "equal_split_observed_wall_percent": percentages(dict(split_attribution_s)),

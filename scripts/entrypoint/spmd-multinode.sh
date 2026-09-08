@@ -111,6 +111,30 @@ fi
 echo "[cpu-threads] NUM_GPUS_TOTAL=${NUM_GPUS_TOTAL} CPU_THREADS_PER_ACTOR=${CPU_THREADS_PER_ACTOR}"
 export CPU_THREADS_PER_ACTOR
 
+# The sync-dedicated MobileGym topology assigns one physical node group to
+# each GPU service role.  Ray labels are attached at raylet startup so the
+# placement-group label selectors in ``relax.core.service`` can enforce the
+# mapping.  Keep this opt-in to preserve all legacy launchers.
+RAY_LABEL_ARGS=()
+if [ "${IS_SYNC_DEDICATED:-0}" = "1" ]; then
+    if [ -z "${SLURM_PROCID:-}" ]; then
+        echo "ERROR: IS_SYNC_DEDICATED=1 requires SLURM_PROCID to assign node roles" >&2
+        exit 1
+    fi
+    case "${SLURM_PROCID}" in
+        0) NODE_ROLE="actor" ;;
+        1|2|3) NODE_ROLE="rollout" ;;
+        4) NODE_ROLE="judge_accuracy" ;;
+        5) NODE_ROLE="judge_multiturn_vlm" ;;
+        *)
+            echo "ERROR: IS_SYNC_DEDICATED=1 supports exactly six nodes (SLURM_PROCID 0..5), got ${SLURM_PROCID}" >&2
+            exit 1
+            ;;
+    esac
+    RAY_LABEL_ARGS=(--labels "relax_role=${NODE_ROLE}")
+    echo "[sync-dedicated] SLURM_PROCID=${SLURM_PROCID} node_role=${NODE_ROLE}"
+fi
+
 # ── head node vs worker node ───────────────────────────────────────────────
 if [ "$MASTER_ADDR" = "$POD_NAME" ]; then
     # ── HEAD NODE ───────────────────────────────────────────────────────────
@@ -118,6 +142,7 @@ if [ "$MASTER_ADDR" = "$POD_NAME" ]; then
     ray start --head \
         --node-ip-address "${HOST_IP}" \
         --num-gpus "${NUM_GPUS}" \
+        "${RAY_LABEL_ARGS[@]}" \
         --disable-usage-stats \
         --dashboard-host=0.0.0.0 \
         --dashboard-port=8265
@@ -148,6 +173,10 @@ if [ "$MASTER_ADDR" = "$POD_NAME" ]; then
             sleep 5
         fi
     done
+
+    if [ "${IS_SYNC_DEDICATED:-0}" = "1" ]; then
+        python3 "${RELAX}/scripts/entrypoint/validate_sync_dedicated_cluster.py" --address auto
+    fi
 
     # Delegate to the training script
     echo "=== Launching training script: $RUN_SCRIPT ==="
@@ -231,6 +260,7 @@ else
             --address="${MASTER_ADDR}:${GCS_PORT}" \
             --num-gpus "${NUM_GPUS}" \
             --node-ip-address "${HOST_IP}" \
+            "${RAY_LABEL_ARGS[@]}" \
             --disable-usage-stats \
             --dashboard-host=0.0.0.0 \
             --dashboard-port=8265; then

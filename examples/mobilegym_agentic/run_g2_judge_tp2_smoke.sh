@@ -17,11 +17,31 @@ export RELAX_JUDGE_GPU_SAMPLE_DIR="${EXP_DIR}/gpu_samples"
 export RELAX_JUDGE_GPU_SAMPLE_INTERVAL_S="${RELAX_JUDGE_GPU_SAMPLE_INTERVAL_S:-0.2}"
 export RELAX_PROPAGATE_ENV_VARS="${RELAX_PROPAGATE_ENV_VARS:+${RELAX_PROPAGATE_ENV_VARS},}CUDNN_LIB_DIR,LD_LIBRARY_PATH,RELAX_JUDGE_GPU_SAMPLE_DIR"
 
-JUDGE_SERVICES_CONFIG="${SCRIPT_DIR}/judge_services_e2e_${REASONING_TRIGGER}.json"
+JUDGE_SERVICES_CONFIG="${JUDGE_SERVICES_CONFIG_OVERRIDE:-${SCRIPT_DIR}/judge_services_e2e_${REASONING_TRIGGER}.json}"
 if [ ! -f "${JUDGE_SERVICES_CONFIG}" ]; then
     echo "ERROR: no judge config at ${JUDGE_SERVICES_CONFIG}" >&2
     exit 1
 fi
+JUDGE_SERVICES_JSON="$(JUDGE_SERVICES_CONFIG="${JUDGE_SERVICES_CONFIG}" python3 - <<'PY'
+import json
+import os
+import sys
+
+
+def expand(value):
+    if isinstance(value, dict):
+        return {key: expand(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [expand(item) for item in value]
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    return value
+
+
+with open(os.environ["JUDGE_SERVICES_CONFIG"], encoding="utf-8") as handle:
+    json.dump(expand(json.load(handle)), sys.stdout, separators=(",", ":"))
+PY
+)"
 
 exec python3 "${SCRIPT_DIR}/g2_judge_tp2_smoke.py" \
     --skip-hf-validate \
@@ -34,7 +54,7 @@ exec python3 "${SCRIPT_DIR}/g2_judge_tp2_smoke.py" \
     --num-rollout 1 \
     --resource '{"judge_accuracy":[1,2],"judge_multiturn_vlm":[1,2]}' \
     --rm-type dual-agentic-judge \
-    --judge-services-config "$(tr -d '\n' < "${JUDGE_SERVICES_CONFIG}")" \
+    --judge-services-config "${JUDGE_SERVICES_JSON}" \
     --use-agentic-rollout \
     --agent-command /bin/true \
     --agent-cwd "${SCRIPT_DIR}" \

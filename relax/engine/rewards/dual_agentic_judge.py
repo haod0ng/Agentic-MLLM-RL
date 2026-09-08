@@ -100,8 +100,16 @@ class DualJudgeExecutor:
 
     @staticmethod
     def _media_payload(context: RewardContextV1, projection: JudgeProjection) -> tuple[list[dict], dict[str, str]]:
-        media_ids = set(projection.media_ids)
-        manifest = [item for item in context.media_manifest if item["media_id"] in media_ids]
+        # RewardContext records media occurrences, so repeated screenshots can
+        # legitimately produce duplicate manifest rows. The projection has
+        # already deduplicated them; emit exactly one ordered row per blob so
+        # the GenRM trust-boundary integrity check sees a canonical envelope.
+        manifest_by_id: dict[str, dict] = {}
+        for item in context.media_manifest:
+            media_id = item.get("media_id")
+            if isinstance(media_id, str) and media_id not in manifest_by_id:
+                manifest_by_id[media_id] = item
+        manifest = [manifest_by_id[media_id] for media_id in projection.media_ids]
         blobs = {media_id: context.media_blobs[media_id].data_uri() for media_id in projection.media_ids}
         return manifest, blobs
 
