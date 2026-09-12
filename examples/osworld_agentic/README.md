@@ -23,3 +23,10 @@ Policy actions are validated before rendering to pyautogui. The policy cannot
 provide either lifecycle or evaluator commands. Query/evaluator failures must
 be treated as infrastructure failures, not reward zero, by the trusted
 evaluator command.
+
+## Published experiment results
+
+The [rollout-only campaign summary](results/rollout_only_campaign_2026_09_11/README.md)
+publishes sanitized aggregate data from a one-node, four-GPU OSWorld rollout
+experiment. The campaign did not meet its acceptance gates, so its diagnostic
+throughput numbers are not a deployment recommendation.

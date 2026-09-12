@@ -1,0 +1,5 @@
+condition,workload,batch,complete_window_s,output_tokens,output_tokens_per_gpu_second,engine_load_coverage_percent,host_coverage_percent,cpu_busy_p95_percent,iowait_p95_percent,native_action_p95_s,delay_within_tolerance,accepted,failed_gates
+c4_delay0,controlled_wait,0,74.635,7693,25.769,88.696261,99.134996,3.908386,0.536372,4.535454,not_applicable,false,engine_load_coverage
+c4_delay0,controlled_wait,1,63.547,4996,19.655,94.962531,99.991155,4.180216,0.006450,4.680365,not_applicable,false,engine_load_coverage
+c16_delay5,controlled_wait,0,123.923,32072,64.702,81.663792,99.914850,10.516296,4.379687,4.535214,false,false,complete_batches|strict_workload|delay_manipulation|engine_load_coverage
+c16_delay5,controlled_wait,1,127.817,29381,57.467,86.467335,99.896435,10.162954,1.313401,4.745234,true,false,complete_batches|strict_workload|engine_load_coverage

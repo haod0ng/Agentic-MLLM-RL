@@ -1,0 +1,6 @@
+attempt,allocation_seconds,gpu_hours,outcome
+1,628,0.697778,failed_before_full_campaign
+2,64,0.071111,failed_before_inference_or_vm_execution
+3,882,0.980000,failed_during_initial_engine_setup
+4,3563,3.958889,partial_campaign_with_final_cleanup_passed
+total,5137,5.707778,within_8_gpu_hour_budget

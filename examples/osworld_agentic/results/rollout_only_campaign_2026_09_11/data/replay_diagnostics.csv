@@ -1,0 +1,6 @@
+condition,concurrency,alpha,capacity_reference,complete_window_s,output_tokens,output_tokens_per_gpu_second,min_engine_load_coverage_percent,accepted,failed_gate
+replay_capacity_reference,4,0.0,true,95.131,40900,107.483,75.685024,false,engine_load_coverage
+replay_c4_alpha1,4,1.0,false,251.193,48278,48.049,94.986512,false,engine_load_coverage
+replay_c16_alpha0,16,0.0,false,60.154,41870,174.012,74.475442,false,engine_load_coverage
+replay_c4_alpha0,4,0.0,false,122.077,37597,76.995,88.305128,false,engine_load_coverage
+replay_c16_alpha1,16,1.0,false,89.772,43802,121.981,84.976744,false,engine_load_coverage

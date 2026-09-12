@@ -1,0 +1,4 @@
+component,count,mean_seconds,p95_seconds,total_seconds,replay_treatment
+native_action_span,112,4.543906,4.695893,508.917453,scaled_by_alpha
+preserved_upstream_residual,112,0.763921,0.885072,85.559171,preserved_once
+recorded_upstream_gap,112,5.307827,5.613995,594.476624,action_span_plus_residual

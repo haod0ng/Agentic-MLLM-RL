@@ -1,0 +1,49 @@
+{
+  "schema_version": "osworld.rollout_only.public_summary.v1",
+  "campaign_date": "2026-09-11",
+  "status": "not_accepted",
+  "scope": "One-node fixed-checkpoint rollout-only experiment with colocated OSWorld virtual machines; no RL deployment claim.",
+  "fixed_configuration": {
+    "model": "Qwen3-VL-4B-Instruct fixed checkpoint",
+    "gpu_count": 4,
+    "engine_count": 4,
+    "tensor_parallel_size": 1,
+    "router": "round_robin",
+    "mem_fraction_static": 0.4,
+    "temperature": 1.0,
+    "seed": 42,
+    "maximum_output_tokens": 1024,
+    "maximum_interaction_steps": 8,
+    "trajectories_per_prompt_group": 4
+  },
+  "acceptance": {
+    "native_capacity_passed": true,
+    "capacity_high": 16,
+    "real_policy_protocol_passed": false,
+    "real_policy_invalid_action_parses": 32,
+    "real_policy_broker_actions": 0,
+    "replay_matrix_passed": false,
+    "live_matrix_passed": false,
+    "recording_usable_for_replay": true,
+    "allocation_cleanup_passed": true,
+    "deployment_recommendation": null
+  },
+  "recording": {
+    "unique_trajectories": 16,
+    "requests": 128,
+    "native_wait_actions": 128,
+    "private_payloads_published": false
+  },
+  "cost": {
+    "budget_gpu_hours": 8.0,
+    "total_gpu_hours": 5.707778,
+    "attempt_count": 4,
+    "includes_failed_attempts": true
+  },
+  "publication_boundary": {
+    "contains_raw_prompts_or_responses": false,
+    "contains_screenshots_or_action_coordinates": false,
+    "contains_private_replay_payloads": false,
+    "contains_host_names_or_scheduler_identifiers": false
+  }
+}
